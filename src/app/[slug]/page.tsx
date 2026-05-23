@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { createServerSupabase } from "@/lib/supabase-server";
+import { toWhatsAppNumber } from "@/lib/phone";
 import BookingFlow from "@/components/booking/BookingFlow";
 
 export const dynamicParams = true;
@@ -27,6 +28,10 @@ export default async function SalonPage({ params }: PageProps) {
     return notFound();
   }
 
+  const whatsappNumber = toWhatsAppNumber(
+    salon.whatsapp_number ?? process.env.NEXT_PUBLIC_WHATSAPP_NUMBER
+  );
+
   const { data: services } = await supabase
     .from("services")
     .select("id,name,description,duration_minutes,price,benefits")
@@ -44,14 +49,16 @@ export default async function SalonPage({ params }: PageProps) {
               <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">Experience a smoother way to book beauty services.</h1>
               <p className="max-w-2xl text-sm leading-7 text-slate-300 sm:text-base">{salon.description ?? "A premium salon experience with automated scheduling, modern customer journeys, and WhatsApp appointment support."}</p>
               <div className="flex flex-wrap items-center gap-4">
-                <a
-                  className="inline-flex rounded-full bg-amber-300 px-6 py-3 text-sm font-semibold text-slate-950 transition hover:bg-amber-200"
-                  href={`https://wa.me/${salon.whatsapp_number ?? "14155238886"}?text=${whatsappMessage}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  WhatsApp booking
-                </a>
+                {whatsappNumber && (
+                  <a
+                    className="inline-flex rounded-full bg-amber-300 px-6 py-3 text-sm font-semibold text-slate-950 transition hover:bg-amber-200"
+                    href={`https://wa.me/${whatsappNumber}?text=${whatsappMessage}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    WhatsApp booking
+                  </a>
+                )}
                 <span className="rounded-full bg-white/5 px-4 py-2 text-sm text-slate-300">Live availability included</span>
               </div>
             </div>

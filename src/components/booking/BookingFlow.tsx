@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { toWhatsAppNumber } from "@/lib/phone";
 import { bookingPayloadSchema } from "@/lib/validators";
 import type { ServiceCard } from "@/types/salon";
 
@@ -54,11 +55,9 @@ export default function BookingFlow({ salonId, salonName, whatsappNumber, servic
     () => services.find((service) => service.id === serviceId) ?? services[0],
     [services, serviceId]
   );
-  const whatsappContactNumber = whatsappNumber
-    ? whatsappNumber.replace(/\D/g, "").replace(/^0+/, "")
-    : "14155238886";
-  const whatsappNumberWithCountryCode =
-    whatsappContactNumber.length === 10 ? `91${whatsappContactNumber}` : whatsappContactNumber;
+  const whatsappNumberWithCountryCode = toWhatsAppNumber(
+    whatsappNumber ?? process.env.NEXT_PUBLIC_WHATSAPP_NUMBER
+  );
   const whatsappMessage = encodeURIComponent(
     `Hi, I want to book an appointment at ${salonName}. Please share available slots, prices, and confirmation details.${
       selectedService?.name ? ` Service: ${selectedService.name}.` : ""
@@ -207,14 +206,16 @@ export default function BookingFlow({ salonId, salonName, whatsappNumber, servic
             <div className="rounded-3xl border border-white/10 bg-slate-900/70 p-4 text-sm text-slate-300">
               <p className="font-semibold text-white">Need help?</p>
               <p>Tap WhatsApp to ask for services, slots, prices, and custom requests.</p>
-              <a
-                href={`https://wa.me/${whatsappNumberWithCountryCode}?text=${whatsappMessage}`}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-4 inline-flex rounded-full bg-emerald-500 px-4 py-2 font-semibold text-white transition hover:bg-emerald-400"
-              >
-                Ask on WhatsApp
-              </a>
+              {whatsappNumberWithCountryCode && (
+                <a
+                  href={`https://wa.me/${whatsappNumberWithCountryCode}?text=${whatsappMessage}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-4 inline-flex rounded-full bg-emerald-500 px-4 py-2 font-semibold text-white transition hover:bg-emerald-400"
+                >
+                  Ask on WhatsApp
+                </a>
+              )}
             </div>
           </form>
         </div>
