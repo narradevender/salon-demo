@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseService } from "@/lib/supabase-service";
-import { sendWhatsAppMessage, notifyOwner, getAvailableSlots, formatTimeRange, formatDate } from "@/lib/whatsapp";
+import {
+  sendWhatsAppImageMessage,
+  sendWhatsAppListMessage,
+  sendWhatsAppMessage,
+  notifyOwner,
+  getAvailableSlots,
+  formatTimeRange,
+  formatDate,
+} from "@/lib/whatsapp";
 
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 const SALON_ID = process.env.NEXT_PUBLIC_SALON_ID || ""; // Default salon for demo
@@ -8,10 +16,20 @@ const COFFEE_WEBHOOK_URL = process.env.COFFEE_WEBHOOK_URL;
 const SALON_TRIGGER = "#salon";
 const SALON_SESSION_TTL_MS = 30 * 60 * 1000;
 const salonSessions = new Map<string, number>();
+const bookingSessions = new Map<string, BookingSession>();
+
+const serviceImages: Record<string, string> = {
+  "girl hair cut": "https://t3.ftcdn.net/jpg/16/27/26/74/240_F_1627267426_9e78jte19XWwJXBuesYeGOGMcyF2PVEG.jpg",
+  "girls hair styling": "https://t4.ftcdn.net/jpg/14/71/76/33/240_F_1471763388_zVwckuVd3xCDG0x4vhFhL7m5PR11L1dl.jpg",
+  "boys hair cut": "https://t4.ftcdn.net/jpg/03/27/37/23/240_F_327372387_nDiUJ8UxnzYVwUsT3fHmUImZOL7jDZ9r.jpg",
+  "boys facial": "https://t3.ftcdn.net/jpg/02/40/00/52/240_F_240005231_D7yUGbqeG2MZOICkZDYiQdZUUm1sQp6T.jpg",
+  "boys hair wash": "https://t4.ftcdn.net/jpg/02/39/85/39/240_F_239853924_ZMGGCae8K7yQtxpTyxad3oun8JiGjFW9.jpg",
+};
 
 type SalonService = {
   id: string;
   name: string;
+  description: string | null;
   price: number;
   duration_minutes: number;
 };
@@ -33,10 +51,29 @@ type WhatsAppWebhookBody = {
           text?: {
             body?: string;
           };
+          interactive?: {
+            type?: string;
+            list_reply?: {
+              id: string;
+              title?: string;
+              description?: string;
+            };
+            button_reply?: {
+              id: string;
+              title?: string;
+            };
+          };
         }>;
       };
     }>;
   }>;
+};
+
+type BookingSession = {
+  selectedService?: SalonService;
+  selectedSlot?: AvailableSlot;
+  awaitingName?: boolean;
+  expiresAt: number;
 };
 
 function getIncomingMessage(body: WhatsAppWebhookBody | null) {
@@ -45,6 +82,10 @@ function getIncomingMessage(body: WhatsAppWebhookBody | null) {
 
 function getMessageText(message: ReturnType<typeof getIncomingMessage>) {
   return message?.type === "text" ? (message.text?.body || "").trim() : "";
+}
+
+function getInteractiveReplyId(message: ReturnType<typeof getIncomingMessage>) {
+  return message?.interactive?.list_reply?.id ?? message?.interactive?.button_reply?.id ?? "";
 }
 
 function hasActiveSalonSession(customerPhone: string) {
@@ -61,6 +102,25 @@ function hasActiveSalonSession(customerPhone: string) {
 
 function rememberSalonSession(customerPhone: string) {
   salonSessions.set(customerPhone, Date.now() + SALON_SESSION_TTL_MS);
+}
+
+function getBookingSession(customerPhone: string) {
+  const session = bookingSessions.get(customerPhone);
+
+  if (!session) return null;
+  if (session.expiresAt < Date.now()) {
+    bookingSessions.delete(customerPhone);
+    return null;
+  }
+
+  return session;
+}
+
+function rememberBookingSession(customerPhone: string, session: Omit<BookingSession, "expiresAt">) {
+  bookingSessions.set(customerPhone, {
+    ...session,
+    expiresAt: Date.now() + SALON_SESSION_TTL_MS,
+  });
 }
 
 function isSalonMessage(customerPhone: string, messageText: string) {
@@ -93,47 +153,82 @@ async function forwardToCoffeeWebhook(body: WhatsAppWebhookBody) {
 async function getSalonServices(salonId: string) {
   const { data } = await supabaseService
     .from("services")
-    .select("id,name,price,duration_minutes")
+    .select("id,name,description,price,duration_minutes")
     .eq("salon_id", salonId)
     .eq("is_active", true)
     .order("price", { ascending: true });
   return data || [];
 }
 
-function buildServicesMenu(services: SalonService[]): string {
-  const lines = [
-    "👋 Welcome to our salon!",
-    "Here are our services:",
-    "",
-    ...services.map((s, idx) => `${idx + 1}️⃣ ${s.name} - ₹${s.price} (${s.duration_minutes} mins)`),
-    "",
-    "Reply with a number (1-${services.length}) to see available slots.",
-  ];
-  return lines.join("\n");
+function serviceCaption(service: SalonService) {
+  return [
+    `*${service.name}*`,
+    `₹${service.price} | ${service.duration_minutes} mins`,
+    service.description,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
-function buildSlotsMenu(service: SalonService, slotsGrouped: Record<string, AvailableSlot[]>): string {
-  const lines = [
-    `✨ *${service.name}* selected`,
-    `💰 ₹${service.price} | ⏱️ ${service.duration_minutes} mins`,
-    "",
-    "📅 Available slots:",
-  ];
+async function sendServicesMenu(recipientPhone: string, services: SalonService[]) {
+  const servicesWithImages = services.slice(0, 5);
 
-  let slotIndex = 1;
-  Object.entries(slotsGrouped).forEach(([dayLabel, daySlots]) => {
-    lines.push("");
-    lines.push(`🔵 ${dayLabel}`);
-    daySlots.forEach((slot) => {
-      const timeRange = formatTimeRange(slot.start_time, slot.end_time);
-      lines.push(`  ${slotIndex}. ${timeRange} ✓`);
-      slotIndex++;
+  for (const service of servicesWithImages) {
+    const imageUrl = serviceImages[service.name.toLowerCase()];
+
+    if (!imageUrl) continue;
+
+    await sendWhatsAppImageMessage({
+      recipientPhone,
+      imageUrl,
+      caption: serviceCaption(service),
     });
-  });
+  }
 
-  lines.push("");
-  lines.push("Reply with slot number to book.");
-  return lines.join("\n");
+  await sendWhatsAppListMessage({
+    recipientPhone,
+    header: "Salon Services",
+    body: "Choose a service to view available appointment slots.",
+    buttonText: "View services",
+    sections: [
+      {
+        title: "Available services",
+        rows: services.map((service) => ({
+          id: `service_${service.id}`,
+          title: service.name.slice(0, 24),
+          description: `₹${service.price} • ${service.duration_minutes} mins`,
+        })),
+      },
+    ],
+  });
+}
+
+async function sendSlotsMenu(recipientPhone: string, service: SalonService, slotsGrouped: Record<string, AvailableSlot[]>) {
+  let remainingRows = 10;
+  const sections = Object.entries(slotsGrouped)
+    .map(([dayLabel, daySlots]) => {
+      const rows = daySlots.slice(0, remainingRows).map((slot) => ({
+        id: `slot_${slot.id}`,
+        title: formatTimeRange(slot.start_time, slot.end_time).slice(0, 24),
+        description: "Available",
+      }));
+
+      remainingRows -= rows.length;
+
+      return {
+        title: dayLabel.slice(0, 24),
+        rows,
+      };
+    })
+    .filter((section) => section.rows.length > 0);
+
+  await sendWhatsAppListMessage({
+    recipientPhone,
+    header: service.name.slice(0, 60),
+    body: `₹${service.price} • ${service.duration_minutes} mins\nChoose a slot to continue booking.`,
+    buttonText: "View slots",
+    sections,
+  });
 }
 
 function getTodayTomorrowDayAfter(): { today: string; tomorrow: string; dayAfter: string } {
@@ -210,82 +305,103 @@ export async function POST(request: NextRequest) {
 
   rememberSalonSession(customerPhone);
 
+  const replyId = getInteractiveReplyId(message);
   const messageText = rawMessageText.toLowerCase().replace(SALON_TRIGGER, "").trim();
 
   const services = await getSalonServices(SALON_ID);
 
-  // Parse message to determine action
-  const serviceMatch = messageText.match(/^([1-9])\d*$/);
-  const isServiceNumber = serviceMatch && parseInt(serviceMatch[1]) <= services.length;
+  if (replyId.startsWith("service_")) {
+    const selectedService = services.find((service) => service.id === replyId.replace("service_", ""));
 
-  // Simple stateless flow based on message content
-  // FLOW: Services Menu (default/greeting)
-  if (!isServiceNumber && !messageText.includes("@")) {
-    const menu = buildServicesMenu(services);
-    await sendWhatsAppMessage({ recipientPhone: customerPhone, message: menu });
-    return NextResponse.json({ status: "ok" });
-  }
-
-  // FLOW: Slots Menu (after service selection)
-  if (isServiceNumber) {
-    const selectedServiceIdx = parseInt(messageText) - 1;
-    const selectedService = services[selectedServiceIdx];
+    if (!selectedService) {
+      await sendWhatsAppMessage({
+        recipientPhone: customerPhone,
+        message: "That service is no longer available. Please choose again.",
+      });
+      await sendServicesMenu(customerPhone, services);
+      return NextResponse.json({ status: "ok" });
+    }
 
     const { grouped, allSlots } = await groupSlotsByDay(SALON_ID, selectedService.id);
 
     if (allSlots.length === 0) {
       await sendWhatsAppMessage({
         recipientPhone: customerPhone,
-        message: "❌ No slots available. Please try another service or call us.",
+        message: "No slots are available for this service right now. Please choose another service.",
       });
+      await sendServicesMenu(customerPhone, services);
       return NextResponse.json({ status: "ok" });
     }
 
-    const slotString = allSlots.map((s) => s.id).join("|");
-    const storeResponse = await sendWhatsAppMessage({
-      recipientPhone: customerPhone,
-      message: `Storing: ${selectedServiceIdx}|${slotString}|${selectedService.id}`,
-    });
-
-    if (!storeResponse) {
-      console.log("Using message pattern for slot tracking");
-    }
-
-    const menu = buildSlotsMenu(selectedService, grouped);
-    await sendWhatsAppMessage({ recipientPhone: customerPhone, message: menu });
+    rememberBookingSession(customerPhone, { selectedService });
+    await sendSlotsMenu(customerPhone, selectedService, grouped);
     return NextResponse.json({ status: "ok" });
   }
 
-  // FLOW: Create Booking (text message = customer name)
-  const isTextMessage = messageText && messageText.length > 2 && messageText.length < 100;
+  if (replyId.startsWith("slot_")) {
+    const bookingSession = getBookingSession(customerPhone);
+    const selectedService = bookingSession?.selectedService;
+    const selectedSlotId = replyId.replace("slot_", "");
 
-  if (isTextMessage) {
-    // For demo: create a booking with the provided name
-    // In production, you'd track which service/slot was selected via stateful session
-    // Get the first available service and next available slot for demo
-    if (services.length === 0) {
+    if (!selectedService) {
       await sendWhatsAppMessage({
         recipientPhone: customerPhone,
-        message: "❌ No services available. Please try again later.",
+        message: "Please choose a service first.",
       });
+      await sendServicesMenu(customerPhone, services);
       return NextResponse.json({ status: "ok" });
     }
 
-    const defaultService = services[0];
-    const { allSlots } = await groupSlotsByDay(SALON_ID, defaultService.id);
+    const { data: slotData } = await supabaseService
+      .from("availability_slots")
+      .select("id,start_time,end_time,is_blocked")
+      .eq("id", selectedSlotId)
+      .eq("salon_id", SALON_ID)
+      .eq("service_id", selectedService.id)
+      .eq("is_blocked", false)
+      .single();
 
-    if (allSlots.length === 0) {
+    if (!slotData) {
       await sendWhatsAppMessage({
         recipientPhone: customerPhone,
-        message: "❌ No slots available. Please try again later or call us.",
+        message: "That slot is no longer available. Please choose another slot.",
       });
+      const { grouped } = await groupSlotsByDay(SALON_ID, selectedService.id);
+      await sendSlotsMenu(customerPhone, selectedService, grouped);
       return NextResponse.json({ status: "ok" });
     }
 
-    const selectedSlot = allSlots[0];
-    const customerName = messageText.charAt(0).toUpperCase() + messageText.slice(1);
+    rememberBookingSession(customerPhone, {
+      selectedService,
+      selectedSlot: slotData,
+      awaitingName: true,
+    });
 
-    // Verify slot is still available
+    await sendWhatsAppMessage({
+      recipientPhone: customerPhone,
+      message: `Great. ${selectedService.name} is available on ${formatDate(slotData.start_time)} at ${formatTimeRange(slotData.start_time, slotData.end_time)}.\n\nPlease reply with your name to confirm the booking.`,
+    });
+    return NextResponse.json({ status: "ok" });
+  }
+
+  if (!messageText || ["hi", "hello", "menu", "services", "book", "booking"].some((word) => messageText.includes(word))) {
+    await sendServicesMenu(customerPhone, services);
+    return NextResponse.json({ status: "ok" });
+  }
+
+  const bookingSession = getBookingSession(customerPhone);
+  const isCustomerName =
+    bookingSession?.awaitingName &&
+    messageText &&
+    messageText.length > 1 &&
+    messageText.length < 80 &&
+    !messageText.includes("@");
+
+  if (isCustomerName && bookingSession.selectedService && bookingSession.selectedSlot) {
+    const selectedService = bookingSession.selectedService;
+    const selectedSlot = bookingSession.selectedSlot;
+    const customerName = rawMessageText.trim();
+
     const { data: slotData } = await supabaseService
       .from("availability_slots")
       .select("id,start_time,end_time,is_blocked")
@@ -296,8 +412,10 @@ export async function POST(request: NextRequest) {
     if (!slotData) {
       await sendWhatsAppMessage({
         recipientPhone: customerPhone,
-        message: "❌ Selected slot is no longer available. Please select another.",
+        message: "Selected slot is no longer available. Please choose another slot.",
       });
+      const { grouped } = await groupSlotsByDay(SALON_ID, selectedService.id);
+      await sendSlotsMenu(customerPhone, selectedService, grouped);
       return NextResponse.json({ status: "ok" });
     }
 
@@ -316,7 +434,7 @@ export async function POST(request: NextRequest) {
       console.error("Customer creation error:", customerError);
       await sendWhatsAppMessage({
         recipientPhone: customerPhone,
-        message: "❌ Booking failed. Please try again.",
+        message: "Booking failed. Please try again.",
       });
       return NextResponse.json({ status: "ok" });
     }
@@ -327,14 +445,14 @@ export async function POST(request: NextRequest) {
       .from("appointments")
       .insert({
         salon_id: SALON_ID,
-        service_id: defaultService.id,
+        service_id: selectedService.id,
         customer_id: customerData.id,
         slot_id: selectedSlot.id,
         booking_reference: bookingRef,
         status: "confirmed",
         scheduled_start: slotData.start_time,
         scheduled_end: slotData.end_time,
-        price: defaultService.price,
+        price: selectedService.price,
         source: "whatsapp",
       })
       .select("id")
@@ -344,19 +462,19 @@ export async function POST(request: NextRequest) {
       console.error("Appointment creation error:", appointmentError);
       await sendWhatsAppMessage({
         recipientPhone: customerPhone,
-        message: "❌ Booking failed. Please try again.",
+        message: "Booking failed. Please try again.",
       });
       return NextResponse.json({ status: "ok" });
     }
     // Send confirmation to customer
     const confirmationMsg = [
-      "✅ Booking Confirmed!",
-      `👤 Name: ${customerName}`,
-      `💇 Service: ${defaultService.name}`,
-      `📅 Date: ${formatDate(slotData.start_time)}`,
-      `🕐 Time: ${formatTimeRange(slotData.start_time, slotData.end_time)}`,
-      `💰 Amount: ₹${defaultService.price}`,
-      `📋 Reference: ${bookingRef}`,
+      "Booking confirmed!",
+      `Name: ${customerName}`,
+      `Service: ${selectedService.name}`,
+      `Date: ${formatDate(slotData.start_time)}`,
+      `Time: ${formatTimeRange(slotData.start_time, slotData.end_time)}`,
+      `Amount: ₹${selectedService.price}`,
+      `Reference: ${bookingRef}`,
       "",
       "Thank you! Our team will call you shortly to confirm.",
     ].join("\n");
@@ -367,7 +485,7 @@ export async function POST(request: NextRequest) {
     await notifyOwner({
       customerName,
       customerPhone,
-      serviceName: defaultService.name,
+      serviceName: selectedService.name,
       slotDate: formatDate(slotData.start_time),
       slotStartTime: new Date(slotData.start_time).toLocaleTimeString("en-IN", {
         hour: "2-digit",
@@ -379,12 +497,18 @@ export async function POST(request: NextRequest) {
         minute: "2-digit",
         hour12: true,
       }),
-      price: defaultService.price,
+      price: selectedService.price,
       bookingReference: bookingRef,
     });
 
+    bookingSessions.delete(customerPhone);
     return NextResponse.json({ status: "ok" });
   }
+
+  await sendWhatsAppMessage({
+    recipientPhone: customerPhone,
+    message: "Please use the menu button to choose a service or type 'services' to start again.",
+  });
 
   return NextResponse.json({ status: "ok" });
 }

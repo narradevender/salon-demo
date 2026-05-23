@@ -13,21 +13,24 @@ interface SendMessageParams {
   message: string;
 }
 
-export async function sendWhatsAppMessage({ recipientPhone, message }: SendMessageParams) {
+type InteractiveRow = {
+  id: string;
+  title: string;
+  description?: string;
+};
+
+type InteractiveSection = {
+  title: string;
+  rows: InteractiveRow[];
+};
+
+async function sendWhatsAppPayload(payload: Record<string, unknown>) {
   if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
     console.warn("Skipping WhatsApp message — credentials not configured");
     return null;
   }
 
   try {
-    const payload: Record<string, unknown> = {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: recipientPhone,
-      type: "text",
-      text: { body: message },
-    };
-
     const response = await fetch(
       `https://graph.facebook.com/${META_API_VERSION}/${META_PHONE_NUMBER_ID}/messages`,
       {
@@ -46,12 +49,84 @@ export async function sendWhatsAppMessage({ recipientPhone, message }: SendMessa
       return null;
     }
 
-    const result = await response.json();
-    return result;
+    return response.json();
   } catch (error) {
     console.error("WhatsApp send error:", error);
     return null;
   }
+}
+
+export async function sendWhatsAppMessage({ recipientPhone, message }: SendMessageParams) {
+  if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
+    console.warn("Skipping WhatsApp message — credentials not configured");
+    return null;
+  }
+
+  try {
+    const payload: Record<string, unknown> = {
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: recipientPhone,
+      type: "text",
+      text: { body: message },
+    };
+
+    return sendWhatsAppPayload(payload);
+  } catch (error) {
+    console.error("WhatsApp send error:", error);
+    return null;
+  }
+}
+
+export async function sendWhatsAppImageMessage({
+  recipientPhone,
+  imageUrl,
+  caption,
+}: {
+  recipientPhone: string;
+  imageUrl: string;
+  caption: string;
+}) {
+  return sendWhatsAppPayload({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: recipientPhone,
+    type: "image",
+    image: {
+      link: imageUrl,
+      caption,
+    },
+  });
+}
+
+export async function sendWhatsAppListMessage({
+  recipientPhone,
+  header,
+  body,
+  buttonText,
+  sections,
+}: {
+  recipientPhone: string;
+  header?: string;
+  body: string;
+  buttonText: string;
+  sections: InteractiveSection[];
+}) {
+  return sendWhatsAppPayload({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: recipientPhone,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: header ? { type: "text", text: header } : undefined,
+      body: { text: body },
+      action: {
+        button: buttonText,
+        sections,
+      },
+    },
+  });
 }
 
 export async function notifyOwner(bookingDetails: {
