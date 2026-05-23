@@ -61,7 +61,7 @@ export default function BookingFlow({ salonId, salonName, whatsappNumber, servic
     whatsappNumber ?? process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? DEFAULT_WHATSAPP_NUMBER
   );
   const whatsappMessage = encodeURIComponent(
-    `Hi, I want to book an appointment at ${salonName}. Please share available slots, prices, and confirmation details.${
+    `#SALON Hi, I want to book an appointment at ${salonName}. Please share available slots, prices, and confirmation details.${
       selectedService?.name ? ` Service: ${selectedService.name}.` : ""
     } Date: ${selectedDate}.`
   );

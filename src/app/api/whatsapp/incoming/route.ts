@@ -4,6 +4,10 @@ import { sendWhatsAppMessage, notifyOwner, getAvailableSlots, formatTimeRange, f
 
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 const SALON_ID = process.env.NEXT_PUBLIC_SALON_ID || ""; // Default salon for demo
+const COFFEE_WEBHOOK_URL = process.env.COFFEE_WEBHOOK_URL;
+const SALON_TRIGGER = "#salon";
+const SALON_SESSION_TTL_MS = 30 * 60 * 1000;
+const salonSessions = new Map<string, number>();
 
 type SalonService = {
   id: string;
@@ -34,6 +38,57 @@ type WhatsAppWebhookBody = {
     }>;
   }>;
 };
+
+function getIncomingMessage(body: WhatsAppWebhookBody | null) {
+  return body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+}
+
+function getMessageText(message: ReturnType<typeof getIncomingMessage>) {
+  return message?.type === "text" ? (message.text?.body || "").trim() : "";
+}
+
+function hasActiveSalonSession(customerPhone: string) {
+  const expiresAt = salonSessions.get(customerPhone);
+
+  if (!expiresAt) return false;
+  if (expiresAt < Date.now()) {
+    salonSessions.delete(customerPhone);
+    return false;
+  }
+
+  return true;
+}
+
+function rememberSalonSession(customerPhone: string) {
+  salonSessions.set(customerPhone, Date.now() + SALON_SESSION_TTL_MS);
+}
+
+function isSalonMessage(customerPhone: string, messageText: string) {
+  const normalizedText = messageText.toLowerCase();
+
+  return normalizedText.includes(SALON_TRIGGER) || hasActiveSalonSession(customerPhone);
+}
+
+async function forwardToCoffeeWebhook(body: WhatsAppWebhookBody) {
+  if (!COFFEE_WEBHOOK_URL) {
+    console.warn("Coffee webhook URL missing — non-salon WhatsApp message ignored");
+    return;
+  }
+
+  try {
+    const response = await fetch(COFFEE_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      console.error("Coffee webhook forward failed:", await response.text());
+    }
+  } catch (error) {
+    console.error("Coffee webhook forward error:", error);
+  }
+}
 
 async function getSalonServices(salonId: string) {
   const { data } = await supabaseService
@@ -139,18 +194,23 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ status: "ok" });
   }
 
-  const entry = body.entry?.[0];
-  const changes = entry?.changes?.[0];
-  const value = changes?.value;
+  const message = getIncomingMessage(body);
 
-  if (!value?.messages?.[0]) {
+  if (!message) {
     return NextResponse.json({ status: "ok" });
   }
 
-  const message = value.messages[0];
   const customerPhone = message.from;
-  const messageType = message.type;
-  const messageText = messageType === "text" ? (message.text?.body || "").trim().toLowerCase() : "";
+  const rawMessageText = getMessageText(message);
+
+  if (!isSalonMessage(customerPhone, rawMessageText)) {
+    await forwardToCoffeeWebhook(body);
+    return NextResponse.json({ status: "ok" });
+  }
+
+  rememberSalonSession(customerPhone);
+
+  const messageText = rawMessageText.toLowerCase().replace(SALON_TRIGGER, "").trim();
 
   const services = await getSalonServices(SALON_ID);
 

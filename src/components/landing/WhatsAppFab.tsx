@@ -4,7 +4,7 @@ const DEFAULT_WHATSAPP_NUMBER = "+917981898151";
 
 export default function WhatsAppFab() {
   const message = encodeURIComponent(
-    "Hi, I want to book an appointment. Please share your services list, available slots, prices, and booking confirmation details.",
+    "#SALON Hi, I want to book an appointment. Please share your services list, available slots, prices, and booking confirmation details.",
   );
   const whatsappNumber = toWhatsAppNumber(
     process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? DEFAULT_WHATSAPP_NUMBER

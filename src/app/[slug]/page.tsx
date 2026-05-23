@@ -17,7 +17,7 @@ export default async function SalonPage({ params }: PageProps) {
   const { slug } = await params;
   const supabase = await createServerSupabase();
   const whatsappMessage = encodeURIComponent(
-    "Hi, I want to book an appointment. Please share your services list, available slots, prices, and booking confirmation details.",
+    "#SALON Hi, I want to book an appointment. Please share your services list, available slots, prices, and booking confirmation details.",
   );
   const { data: salon, error: salonError } = await supabase
     .from("salons")
