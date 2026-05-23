@@ -5,6 +5,8 @@ import BookingFlow from "@/components/booking/BookingFlow";
 
 export const dynamicParams = true;
 
+const DEFAULT_WHATSAPP_NUMBER = "+917981898151";
+
 type PageProps = {
   params: Promise<{
     slug: string;
@@ -29,7 +31,7 @@ export default async function SalonPage({ params }: PageProps) {
   }
 
   const whatsappNumber = toWhatsAppNumber(
-    salon.whatsapp_number ?? process.env.NEXT_PUBLIC_WHATSAPP_NUMBER
+    salon.whatsapp_number ?? process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? DEFAULT_WHATSAPP_NUMBER
   );
 
   const { data: services } = await supabase
@@ -49,16 +51,14 @@ export default async function SalonPage({ params }: PageProps) {
               <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl">Experience a smoother way to book beauty services.</h1>
               <p className="max-w-2xl text-sm leading-7 text-slate-300 sm:text-base">{salon.description ?? "A premium salon experience with automated scheduling, modern customer journeys, and WhatsApp appointment support."}</p>
               <div className="flex flex-wrap items-center gap-4">
-                {whatsappNumber && (
-                  <a
-                    className="inline-flex rounded-full bg-amber-300 px-6 py-3 text-sm font-semibold text-slate-950 transition hover:bg-amber-200"
-                    href={`https://wa.me/${whatsappNumber}?text=${whatsappMessage}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    WhatsApp booking
-                  </a>
-                )}
+                <a
+                  className="inline-flex rounded-full bg-amber-300 px-6 py-3 text-sm font-semibold text-slate-950 transition hover:bg-amber-200"
+                  href={`https://wa.me/${whatsappNumber}?text=${whatsappMessage}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  WhatsApp booking
+                </a>
                 <span className="rounded-full bg-white/5 px-4 py-2 text-sm text-slate-300">Live availability included</span>
               </div>
             </div>
