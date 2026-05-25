@@ -243,21 +243,7 @@ function serviceCaption(service: SalonService) {
 }
 
 async function sendServicesMenu(recipientPhone: string, services: SalonService[]) {
-  const servicesWithImages = services.slice(0, 5);
-
-  for (const service of servicesWithImages) {
-    const imageUrl = serviceImages[service.name.toLowerCase()];
-
-    if (!imageUrl) continue;
-
-    await sendWhatsAppImageMessage({
-      recipientPhone,
-      imageUrl,
-      caption: serviceCaption(service),
-    });
-  }
-
-  await sendWhatsAppListMessage({
+  const listResult = await sendWhatsAppListMessage({
     recipientPhone,
     header: "Salon Services",
     body: "Choose a service to view available appointment slots.",
@@ -273,6 +259,24 @@ async function sendServicesMenu(recipientPhone: string, services: SalonService[]
       },
     ],
   });
+
+  const servicesWithImages = services.slice(0, 3);
+
+  await Promise.allSettled(
+    servicesWithImages.map((service) => {
+      const imageUrl = serviceImages[service.name.toLowerCase()];
+
+      if (!imageUrl) return Promise.resolve(null);
+
+      return sendWhatsAppImageMessage({
+        recipientPhone,
+        imageUrl,
+        caption: serviceCaption(service),
+      });
+    })
+  );
+
+  return listResult;
 }
 
 function dateKeyForOffset(offsetDays: number) {
