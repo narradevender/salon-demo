@@ -9,12 +9,22 @@ const SALON_TRIGGER = "#salon";
 const SALON_SESSION_TTL_MS = 30 * 60 * 1000;
 const salonSessions = new Map<string, number>();
 
+export const dynamic = "force-dynamic";
+
 type SalonService = {
   id: string;
   name: string;
   price: number;
   duration_minutes: number;
 };
+
+const fallbackServices: SalonService[] = [
+  { id: "boys-hair-wash", name: "Boys Hair Wash", price: 299, duration_minutes: 20 },
+  { id: "boys-hair-cut", name: "Boys Hair Cut", price: 399, duration_minutes: 30 },
+  { id: "girl-hair-cut", name: "Girl Hair Cut", price: 799, duration_minutes: 45 },
+  { id: "boys-facial", name: "Boys Facial", price: 899, duration_minutes: 45 },
+  { id: "girls-hair-styling", name: "Girls Hair Styling", price: 1299, duration_minutes: 60 },
+];
 
 type AvailableSlot = {
   id: string;
@@ -91,13 +101,29 @@ async function forwardToCoffeeWebhook(body: WhatsAppWebhookBody) {
 }
 
 async function getSalonServices(salonId: string) {
-  const { data } = await supabaseService
-    .from("services")
-    .select("id,name,price,duration_minutes")
-    .eq("salon_id", salonId)
-    .eq("is_active", true)
-    .order("price", { ascending: true });
-  return data || [];
+  if (!salonId) {
+    console.warn("NEXT_PUBLIC_SALON_ID missing - using fallback WhatsApp services");
+    return fallbackServices;
+  }
+
+  try {
+    const { data, error } = await supabaseService
+      .from("services")
+      .select("id,name,price,duration_minutes")
+      .eq("salon_id", salonId)
+      .eq("is_active", true)
+      .order("price", { ascending: true });
+
+    if (error) {
+      console.error("WhatsApp services fetch failed:", error.message);
+      return fallbackServices;
+    }
+
+    return data?.length ? data : fallbackServices;
+  } catch (error) {
+    console.error("WhatsApp services fetch error:", error);
+    return fallbackServices;
+  }
 }
 
 function buildServicesMenu(services: SalonService[]): string {
@@ -188,180 +214,203 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const body = (await request.json().catch(() => null)) as WhatsAppWebhookBody | null;
+  try {
+    const body = (await request.json().catch(() => null)) as WhatsAppWebhookBody | null;
 
-  if (!body || !body.entry) {
-    return NextResponse.json({ status: "ok" });
-  }
-
-  const message = getIncomingMessage(body);
-
-  if (!message) {
-    return NextResponse.json({ status: "ok" });
-  }
-
-  const customerPhone = message.from;
-  const rawMessageText = getMessageText(message);
-
-  if (!isSalonMessage(customerPhone, rawMessageText)) {
-    await forwardToCoffeeWebhook(body);
-    return NextResponse.json({ status: "ok" });
-  }
-
-  rememberSalonSession(customerPhone);
-
-  const messageText = rawMessageText.toLowerCase().replace(SALON_TRIGGER, "").trim();
-  const services = await getSalonServices(SALON_ID);
-
-  const serviceMatch = messageText.match(/^([1-9])\d*$/);
-  const isServiceNumber = serviceMatch && parseInt(serviceMatch[1]) <= services.length;
-
-  if (!isServiceNumber && !messageText.includes("@")) {
-    const menu = buildServicesMenu(services);
-    await sendWhatsAppMessage({ recipientPhone: customerPhone, message: menu });
-    return NextResponse.json({ status: "ok" });
-  }
-
-  if (isServiceNumber) {
-    const selectedServiceIdx = parseInt(messageText) - 1;
-    const selectedService = services[selectedServiceIdx];
-
-    const { grouped, allSlots } = await groupSlotsByDay(SALON_ID, selectedService.id);
-
-    if (allSlots.length === 0) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "No slots available. Please try another service or call us.",
-      });
+    if (!body || !body.entry) {
       return NextResponse.json({ status: "ok" });
     }
 
-    const menu = buildSlotsMenu(selectedService, grouped);
-    await sendWhatsAppMessage({ recipientPhone: customerPhone, message: menu });
-    return NextResponse.json({ status: "ok" });
-  }
+    const message = getIncomingMessage(body);
 
-  const isTextMessage = messageText && messageText.length > 2 && messageText.length < 100;
-
-  if (isTextMessage) {
-    if (services.length === 0) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "No services available. Please try again later.",
-      });
+    if (!message) {
       return NextResponse.json({ status: "ok" });
     }
 
-    const defaultService = services[0];
-    const { allSlots } = await groupSlotsByDay(SALON_ID, defaultService.id);
+    const customerPhone = message.from;
+    const rawMessageText = getMessageText(message);
 
-    if (allSlots.length === 0) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "No slots available. Please try again later or call us.",
-      });
+    if (!isSalonMessage(customerPhone, rawMessageText)) {
+      await forwardToCoffeeWebhook(body);
       return NextResponse.json({ status: "ok" });
     }
 
-    const selectedSlot = allSlots[0];
-    const customerName = messageText.charAt(0).toUpperCase() + messageText.slice(1);
-
-    const { data: slotData } = await supabaseService
-      .from("availability_slots")
-      .select("id,start_time,end_time,is_blocked")
-      .eq("id", selectedSlot.id)
-      .eq("is_blocked", false)
-      .single();
-
-    if (!slotData) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "Selected slot is no longer available. Please select another.",
-      });
-      return NextResponse.json({ status: "ok" });
-    }
-
-    const { data: customerData, error: customerError } = await supabaseService
-      .from("customers")
-      .insert({
-        salon_id: SALON_ID,
-        name: customerName,
-        phone: customerPhone,
-      })
-      .select("id")
-      .single();
-
-    if (customerError || !customerData) {
-      console.error("Customer creation error:", customerError);
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "Booking failed. Please try again.",
-      });
-      return NextResponse.json({ status: "ok" });
-    }
-
-    const bookingRef = `SALON-${Date.now()}`;
-    const { data: appointmentData, error: appointmentError } = await supabaseService
-      .from("appointments")
-      .insert({
-        salon_id: SALON_ID,
-        service_id: defaultService.id,
-        customer_id: customerData.id,
-        slot_id: selectedSlot.id,
-        booking_reference: bookingRef,
-        status: "confirmed",
-        scheduled_start: slotData.start_time,
-        scheduled_end: slotData.end_time,
-        price: defaultService.price,
-        source: "whatsapp",
-      })
-      .select("id")
-      .single();
-
-    if (appointmentError || !appointmentData) {
-      console.error("Appointment creation error:", appointmentError);
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "Booking failed. Please try again.",
-      });
-      return NextResponse.json({ status: "ok" });
-    }
-
-    const confirmationMsg = [
-      "Booking Confirmed!",
-      `Name: ${customerName}`,
-      `Service: ${defaultService.name}`,
-      `Date: ${formatDate(slotData.start_time)}`,
-      `Time: ${formatTimeRange(slotData.start_time, slotData.end_time)}`,
-      `Amount: Rs.${defaultService.price}`,
-      `Reference: ${bookingRef}`,
-      "",
-      "Thank you! Our team will call you shortly to confirm.",
-    ].join("\n");
-
-    await sendWhatsAppMessage({ recipientPhone: customerPhone, message: confirmationMsg });
-
-    await notifyOwner({
-      customerName,
-      customerPhone,
-      serviceName: defaultService.name,
-      slotDate: formatDate(slotData.start_time),
-      slotStartTime: new Date(slotData.start_time).toLocaleTimeString("en-IN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      }),
-      slotEndTime: new Date(slotData.end_time).toLocaleTimeString("en-IN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      }),
-      price: defaultService.price,
-      bookingReference: bookingRef,
+    console.log("Salon WhatsApp message received", {
+      from: customerPhone,
+      text: rawMessageText.slice(0, 80),
     });
 
+    rememberSalonSession(customerPhone);
+
+    const messageText = rawMessageText.toLowerCase().replace(SALON_TRIGGER, "").trim();
+    const services = await getSalonServices(SALON_ID);
+
+    const serviceMatch = messageText.match(/^([1-9])\d*$/);
+    const isServiceNumber = serviceMatch && parseInt(serviceMatch[1]) <= services.length;
+
+    if (!isServiceNumber && !messageText.includes("@")) {
+      const menu = buildServicesMenu(services);
+      const result = await sendWhatsAppMessage({ recipientPhone: customerPhone, message: menu });
+
+      if (!result) {
+        console.error("Salon services menu send failed");
+      }
+
+      return NextResponse.json({ status: "ok" });
+    }
+
+    if (isServiceNumber) {
+      const selectedServiceIdx = parseInt(messageText) - 1;
+      const selectedService = services[selectedServiceIdx];
+
+      if (fallbackServices.some((service) => service.id === selectedService.id)) {
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "Please share your name. Our team will call you back to confirm the available slot.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const { grouped, allSlots } = await groupSlotsByDay(SALON_ID, selectedService.id);
+
+      if (allSlots.length === 0) {
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "No slots available. Please try another service or call us.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const menu = buildSlotsMenu(selectedService, grouped);
+      await sendWhatsAppMessage({ recipientPhone: customerPhone, message: menu });
+      return NextResponse.json({ status: "ok" });
+    }
+
+    const isTextMessage = messageText && messageText.length > 2 && messageText.length < 100;
+
+    if (isTextMessage) {
+      if (services.length === 0) {
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "No services available. Please try again later.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const defaultService = services[0];
+      const { allSlots } = await groupSlotsByDay(SALON_ID, defaultService.id);
+
+      if (allSlots.length === 0) {
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "No slots available. Please try again later or call us.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const selectedSlot = allSlots[0];
+      const customerName = messageText.charAt(0).toUpperCase() + messageText.slice(1);
+
+      const { data: slotData } = await supabaseService
+        .from("availability_slots")
+        .select("id,start_time,end_time,is_blocked")
+        .eq("id", selectedSlot.id)
+        .eq("is_blocked", false)
+        .single();
+
+      if (!slotData) {
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "Selected slot is no longer available. Please select another.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const { data: customerData, error: customerError } = await supabaseService
+        .from("customers")
+        .insert({
+          salon_id: SALON_ID,
+          name: customerName,
+          phone: customerPhone,
+        })
+        .select("id")
+        .single();
+
+      if (customerError || !customerData) {
+        console.error("Customer creation error:", customerError);
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "Booking failed. Please try again.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const bookingRef = `SALON-${Date.now()}`;
+      const { data: appointmentData, error: appointmentError } = await supabaseService
+        .from("appointments")
+        .insert({
+          salon_id: SALON_ID,
+          service_id: defaultService.id,
+          customer_id: customerData.id,
+          slot_id: selectedSlot.id,
+          booking_reference: bookingRef,
+          status: "confirmed",
+          scheduled_start: slotData.start_time,
+          scheduled_end: slotData.end_time,
+          price: defaultService.price,
+          source: "whatsapp",
+        })
+        .select("id")
+        .single();
+
+      if (appointmentError || !appointmentData) {
+        console.error("Appointment creation error:", appointmentError);
+        await sendWhatsAppMessage({
+          recipientPhone: customerPhone,
+          message: "Booking failed. Please try again.",
+        });
+        return NextResponse.json({ status: "ok" });
+      }
+
+      const confirmationMsg = [
+        "Booking Confirmed!",
+        `Name: ${customerName}`,
+        `Service: ${defaultService.name}`,
+        `Date: ${formatDate(slotData.start_time)}`,
+        `Time: ${formatTimeRange(slotData.start_time, slotData.end_time)}`,
+        `Amount: Rs.${defaultService.price}`,
+        `Reference: ${bookingRef}`,
+        "",
+        "Thank you! Our team will call you shortly to confirm.",
+      ].join("\n");
+
+      await sendWhatsAppMessage({ recipientPhone: customerPhone, message: confirmationMsg });
+
+      await notifyOwner({
+        customerName,
+        customerPhone,
+        serviceName: defaultService.name,
+        slotDate: formatDate(slotData.start_time),
+        slotStartTime: new Date(slotData.start_time).toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        }),
+        slotEndTime: new Date(slotData.end_time).toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        }),
+        price: defaultService.price,
+        bookingReference: bookingRef,
+      });
+
+      return NextResponse.json({ status: "ok" });
+    }
+
+    return NextResponse.json({ status: "ok" });
+  } catch (error) {
+    console.error("WhatsApp webhook crashed:", error);
     return NextResponse.json({ status: "ok" });
   }
-
-  return NextResponse.json({ status: "ok" });
 }
