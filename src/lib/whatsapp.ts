@@ -129,6 +129,44 @@ export async function sendWhatsAppListMessage({
   });
 }
 
+type InteractiveButton = {
+  id: string;
+  title: string;
+};
+
+export async function sendWhatsAppButtonMessage({
+  recipientPhone,
+  header,
+  body,
+  buttons,
+}: {
+  recipientPhone: string;
+  header?: string;
+  body: string;
+  buttons: InteractiveButton[];
+}) {
+  return sendWhatsAppPayload({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: recipientPhone,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      header: header ? { type: "text", text: header } : undefined,
+      body: { text: body },
+      action: {
+        buttons: buttons.slice(0, 3).map((button) => ({
+          type: "reply",
+          reply: {
+            id: button.id,
+            title: button.title.slice(0, 20),
+          },
+        })),
+      },
+    },
+  });
+}
+
 export async function notifyOwner(bookingDetails: {
   customerName: string;
   customerPhone: string;
