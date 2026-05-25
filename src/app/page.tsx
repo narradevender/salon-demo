@@ -1,22 +1,23 @@
 import ContactSection from "@/components/landing/ContactSection";
-import Gallery from "@/components/landing/Gallery";
 import Hero from "@/components/landing/Hero";
+import Navbar from "@/components/landing/Navbar";
+import Portfolio from "@/components/landing/Portfolio";
 import ServicesSection from "@/components/landing/ServicesSection";
-import Testimonials from "@/components/landing/Testimonials";
 import WhatsAppFab from "@/components/landing/WhatsAppFab";
 
 export const metadata = {
-  title: "Salon Demo | Luxury Salon Booking Platform",
-  description: "Mobile-first salon appointment booking SaaS for Hyderabad salons.",
+  title: "NyCAA 14 Salon | Hair, Styling & Grooming in Hyderabad",
+  description:
+    "NyCAA 14 — a premium neighbourhood salon in Hyderabad. Hair, styling, facials, and grooming for men and women. Book on WhatsApp.",
 };
 
 export default function Home() {
   return (
     <div className="bg-slate-950 text-slate-100">
+      <Navbar />
       <Hero />
       <ServicesSection />
-      <Testimonials />
-      <Gallery />
+      <Portfolio />
       <ContactSection />
       <WhatsAppFab />
     </div>

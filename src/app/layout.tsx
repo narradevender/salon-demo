@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Salon Demo | Salon Booking SaaS",
-  description: "Mobile-first salon appointment booking platform with Supabase and Vercel.",
+  title: "NyCAA 14 Salon | Hyderabad",
+  description: "NyCAA 14 — premium hair, styling, and grooming in Hyderabad. Book on WhatsApp.",
 };
 
 export default function RootLayout({

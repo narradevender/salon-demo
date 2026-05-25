@@ -167,6 +167,40 @@ export async function sendWhatsAppButtonMessage({
   });
 }
 
+export async function sendWhatsAppTemplateMessage({
+  recipientPhone,
+  templateName,
+  languageCode = "en",
+  bodyParameters = [],
+}: {
+  recipientPhone: string;
+  templateName: string;
+  languageCode?: string;
+  bodyParameters?: string[];
+}) {
+  const components =
+    bodyParameters.length > 0
+      ? [
+          {
+            type: "body",
+            parameters: bodyParameters.map((value) => ({ type: "text", text: value })),
+          },
+        ]
+      : undefined;
+
+  return sendWhatsAppPayload({
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: recipientPhone,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: languageCode },
+      ...(components ? { components } : {}),
+    },
+  });
+}
+
 export async function notifyOwner(bookingDetails: {
   customerName: string;
   customerPhone: string;
@@ -181,6 +215,32 @@ export async function notifyOwner(bookingDetails: {
   if (!ownerPhone) {
     console.warn("Owner phone not configured — skipping owner notification");
     return null;
+  }
+
+  const templateName = process.env.META_OWNER_NOTIFICATION_TEMPLATE;
+  const templateLang = process.env.META_OWNER_NOTIFICATION_TEMPLATE_LANG || "en";
+
+  // Template params (must match the {{1}}..{{7}} placeholders in the approved template)
+  const bodyParameters = [
+    bookingDetails.customerName,
+    bookingDetails.customerPhone,
+    bookingDetails.serviceName,
+    bookingDetails.slotDate,
+    `${bookingDetails.slotStartTime} - ${bookingDetails.slotEndTime}`,
+    String(bookingDetails.price),
+    bookingDetails.bookingReference,
+  ];
+
+  // Prefer approved template — works outside the 24-hour customer service window.
+  if (templateName) {
+    const result = await sendWhatsAppTemplateMessage({
+      recipientPhone: ownerPhone,
+      templateName,
+      languageCode: templateLang,
+      bodyParameters,
+    });
+    if (result) return result;
+    console.warn("Template send failed — falling back to free-form text (requires 24-hour window)");
   }
 
   const message = `📌 NEW BOOKING REQUEST
