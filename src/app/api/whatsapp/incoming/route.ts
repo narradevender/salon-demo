@@ -19,6 +19,26 @@ const SALON_SESSION_TTL_MS = 30 * 60 * 1000;
 const salonSessions = new Map<string, number>();
 const bookingSessions = new Map<string, BookingSession>();
 
+const SALON_INTENT_PATTERNS = [
+  /\bappointment\b/i,
+  /\bsalon\b/i,
+  /\bbeauty\b/i,
+  /\bhair\s*cut\b/i,
+  /\bhaircut\b/i,
+  /\bhair\s*wash\b/i,
+  /\bhair\s*styling\b/i,
+  /\bfacial\b/i,
+];
+
+const SALON_MENU_PATTERNS = [
+  /\bhi+\b/i,
+  /\bhello\b/i,
+  /\bmenu\b/i,
+  /\bservices?\b/i,
+  /\bbook(?:ing)?\b/i,
+  ...SALON_INTENT_PATTERNS,
+];
+
 const serviceImages: Record<string, string> = {
   "girl hair cut": "https://t3.ftcdn.net/jpg/16/27/26/74/240_F_1627267426_9e78jte19XWwJXBuesYeGOGMcyF2PVEG.jpg",
   "girls hair styling": "https://t4.ftcdn.net/jpg/14/71/76/33/240_F_1471763388_zVwckuVd3xCDG0x4vhFhL7m5PR11L1dl.jpg",
@@ -150,10 +170,19 @@ function isSalonReplyId(replyId: string) {
   );
 }
 
+function hasSalonIntent(messageText: string) {
+  return SALON_INTENT_PATTERNS.some((pattern) => pattern.test(messageText));
+}
+
+function isSalonMenuRequest(messageText: string) {
+  return !messageText || SALON_MENU_PATTERNS.some((pattern) => pattern.test(messageText));
+}
+
 function isSalonMessage(customerPhone: string, messageText: string, replyId: string) {
   const normalizedText = messageText.toLowerCase();
 
   if (normalizedText.includes(SALON_TRIGGER)) return true;
+  if (hasSalonIntent(normalizedText)) return true;
   if (isSalonReplyId(replyId)) return true;
   if (hasActiveSalonSession(customerPhone)) return true;
   // If user has a booking session in progress, keep them in the salon flow
@@ -665,7 +694,7 @@ export async function POST(request: NextRequest) {
   // ────────────────────────────────────────────
   // Fallback: greeting / menu
   // ────────────────────────────────────────────
-  if (!messageText || ["hi", "hello", "menu", "services", "book", "booking"].some((word) => messageText.includes(word))) {
+  if (isSalonMenuRequest(messageText)) {
     const services = await getSalonServices(SALON_ID);
     await sendServicesMenu(customerPhone, services);
     return NextResponse.json({ status: "ok" });
