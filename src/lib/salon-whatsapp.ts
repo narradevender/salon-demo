@@ -2,8 +2,7 @@ import { toWhatsAppNumber } from "@/lib/phone";
 
 const DEFAULT_WHATSAPP_NUMBER = "+917981898151";
 
-export const SALON_TRIGGER_MESSAGE =
-  "#SALON Hi, I want to book an appointment. Please share your services list, available slots, prices, and booking confirmation.";
+export const SALON_TRIGGER_MESSAGE = "Hi";
 
 export function getSalonWhatsAppUrl(message: string = SALON_TRIGGER_MESSAGE) {
   const number = toWhatsAppNumber(

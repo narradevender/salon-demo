@@ -48,17 +48,17 @@ const services = [
 
 export default function ServicesSection() {
   return (
-    <section id="services" className="scroll-mt-20 bg-slate-950 px-6 py-20 text-slate-100 sm:px-8 lg:px-12">
+    <section className="bg-slate-950 px-6 py-20 text-slate-100 sm:px-8 lg:px-12">
       <div className="mx-auto max-w-7xl">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-2xl">
-            <p className="text-sm uppercase tracking-[0.35em] text-amber-300/80">Our services</p>
+            <p className="text-sm uppercase tracking-[0.35em] text-amber-300/80">Premium services</p>
             <h2 className="mt-4 text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-              Everything we do at NyCAA 14, with clear pricing.
+              A visual salon menu with photos, prices, and quick service details.
             </h2>
           </div>
           <p className="max-w-xl text-sm leading-7 text-slate-400 sm:text-base">
-            Tap any service to book on WhatsApp — pick your day, choose a time, and you&apos;re set.
+            The same catalog is used for the website showcase and WhatsApp service flow.
           </p>
         </div>
         <div className="mt-12 grid gap-6 md:grid-cols-2 xl:grid-cols-3">

@@ -42,7 +42,7 @@ export default function LoginForm() {
     <div className="mx-auto max-w-md rounded-[2rem] border border-white/10 bg-slate-950/80 p-8 shadow-2xl shadow-black/20 backdrop-blur-xl">
       <h1 className="text-3xl font-semibold text-white">Salon owner login</h1>
       <p className="mt-4 text-sm leading-7 text-slate-300">
-        Sign in to manage bookings, customers, and analytics for NyCAA 14.
+        Sign in to manage bookings, customers, and analytics for your salon.
       </p>
       <form onSubmit={handleSubmit} className="mt-8 space-y-5">
         <label className="block text-sm text-slate-300">

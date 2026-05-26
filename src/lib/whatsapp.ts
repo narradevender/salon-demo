@@ -1,11 +1,33 @@
+import crypto from "crypto";
 import { supabaseService } from "./supabase-service";
 
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
 const META_API_VERSION = process.env.META_API_VERSION || "v21.0";
+const META_APP_SECRET = process.env.META_APP_SECRET;
 
 if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
   console.warn("⚠️ Meta WhatsApp credentials missing — WhatsApp messaging disabled");
+}
+
+// Verifies the X-Hub-Signature-256 header Meta sends on every webhook POST.
+// Without this anyone who knows the URL can POST and trigger outbound messages.
+export function verifyMetaSignature(rawBody: string, signatureHeader: string | null): boolean {
+  if (!META_APP_SECRET) {
+    console.warn("META_APP_SECRET not set — webhook signature check skipped (insecure)");
+    return true;
+  }
+  if (!signatureHeader || !signatureHeader.startsWith("sha256=")) return false;
+
+  const expected = crypto.createHmac("sha256", META_APP_SECRET).update(rawBody).digest("hex");
+  const provided = signatureHeader.slice("sha256=".length);
+
+  if (expected.length !== provided.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(provided, "hex"));
+  } catch {
+    return false;
+  }
 }
 
 interface SendMessageParams {

@@ -280,6 +280,57 @@ export interface Database {
         };
         Relationships: [];
       };
+      whatsapp_sessions: {
+        Row: {
+          phone: string;
+          salon_id: string;
+          step: string;
+          selected_service_id: string | null;
+          selected_slot_id: string | null;
+          customer_name: string | null;
+          updated_at: string;
+          expires_at: string;
+        };
+        Insert: {
+          phone: string;
+          salon_id: string;
+          step?: string;
+          selected_service_id?: string | null;
+          selected_slot_id?: string | null;
+          customer_name?: string | null;
+          updated_at?: string;
+          expires_at?: string;
+        };
+        Update: {
+          phone?: string;
+          salon_id?: string;
+          step?: string;
+          selected_service_id?: string | null;
+          selected_slot_id?: string | null;
+          customer_name?: string | null;
+          updated_at?: string;
+          expires_at?: string;
+        };
+        Relationships: [];
+      };
+      whatsapp_processed_messages: {
+        Row: {
+          message_id: string;
+          phone: string;
+          processed_at: string;
+        };
+        Insert: {
+          message_id: string;
+          phone: string;
+          processed_at?: string;
+        };
+        Update: {
+          message_id?: string;
+          phone?: string;
+          processed_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

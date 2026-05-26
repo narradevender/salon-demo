@@ -29,7 +29,7 @@ export default function Sidebar({ ownerEmail }: { ownerEmail: string }) {
   return (
     <aside className="flex w-full shrink-0 flex-col gap-2 rounded-[2rem] border border-white/10 bg-white/5 p-4 backdrop-blur-xl lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:w-64">
       <div className="px-3 py-4">
-        <p className="text-xs uppercase tracking-[0.3em] text-amber-300">NyCAA 14</p>
+        <p className="text-xs uppercase tracking-[0.3em] text-amber-300">Salon Demo</p>
         <p className="mt-2 truncate text-sm text-slate-300">{ownerEmail}</p>
       </div>
       <nav className="flex flex-col gap-1">
