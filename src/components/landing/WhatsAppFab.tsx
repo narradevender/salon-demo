@@ -4,9 +4,11 @@ const WHATSAPP_LOGO =
   "https://i.pinimg.com/564x/ae/64/6b/ae646b4adeb670a35df6c73ef548904f.jpg";
 
 export default function WhatsAppFab() {
+  const href = getSalonWhatsAppUrl();
+  if (!href) return null;
   return (
     <a
-      href={getSalonWhatsAppUrl()}
+      href={href}
       target="_blank"
       rel="noopener noreferrer"
       aria-label="Book on WhatsApp"
