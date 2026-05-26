@@ -68,7 +68,7 @@ export async function POST(request: Request) {
     .single();
 
   if (appointmentError || !appointment) {
-    return NextResponse.json({ error: appointmentError?.message ?? "Unable to create booking." }, { status: 500 });
+    return NextResponse.json({ error: appointmentError?.message ?? "Unable to create booking. Please try again." }, { status: 500 });
   }
 
   return NextResponse.json({ appointment: appointment });

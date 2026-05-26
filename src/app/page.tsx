@@ -1,6 +1,7 @@
 import ContactSection from "@/components/landing/ContactSection";
 import Gallery from "@/components/landing/Gallery";
 import Hero from "@/components/landing/Hero";
+import HowItWorks from "@/components/landing/HowItWorks";
 import ServicesSection from "@/components/landing/ServicesSection";
 import Testimonials from "@/components/landing/Testimonials";
 import WhatsAppFab from "@/components/landing/WhatsAppFab";
@@ -15,6 +16,7 @@ export default function Home() {
     <div className="bg-slate-950 text-slate-100">
       <Hero />
       <ServicesSection />
+      <HowItWorks />
       <Testimonials />
       <Gallery />
       <ContactSection />
