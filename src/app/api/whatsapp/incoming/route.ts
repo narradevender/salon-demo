@@ -3,6 +3,7 @@ import { supabaseService } from "@/lib/supabase-service";
 import {
   sendWhatsAppMessage,
   sendWhatsAppButtonMessage,
+  sendWhatsAppListMessage,
   notifyOwner,
   getAvailableSlots,
   formatTimeRange,
@@ -23,6 +24,11 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 const BTN_VIEW_SERVICES = "view_services";
 const BTN_TALK_OWNER = "talk_owner";
+const SERVICE_ID_PREFIX = "service_";
+const SLOT_ID_PREFIX = "slot_";
+
+// WhatsApp list-message row title max is 24 chars.
+const ROW_TITLE_MAX = 24;
 
 export const dynamic = "force-dynamic";
 
@@ -200,17 +206,36 @@ async function getSalonServices(salonId: string): Promise<SalonService[]> {
   return data ?? [];
 }
 
-function buildServicesMenu(services: SalonService[]): string {
-  if (services.length === 0) return "No services available right now. Please call us.";
-  return [
-    "Here are our services:",
-    "",
-    ...services.map(
-      (s, i) => `${i + 1}. ${s.name} — Rs.${s.price} (${s.duration_minutes} mins)`,
-    ),
-    "",
-    `Reply with a number (1-${services.length}) to see available slots.`,
-  ].join("\n");
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
+}
+
+async function sendServicesList(phone: string, services: SalonService[]): Promise<void> {
+  if (services.length === 0) {
+    await sendWhatsAppMessage({
+      recipientPhone: phone,
+      message: "No services available right now. Please call us.",
+    });
+    return;
+  }
+
+  await sendWhatsAppListMessage({
+    recipientPhone: phone,
+    header: "Our Services",
+    body: "Tap below to see our services and pick one to view slots.",
+    buttonText: "View services",
+    sections: [
+      {
+        title: "Services",
+        rows: services.slice(0, 10).map((s) => ({
+          id: `${SERVICE_ID_PREFIX}${s.id}`,
+          title: truncate(s.name, ROW_TITLE_MAX),
+          description: `Rs.${s.price} • ${s.duration_minutes} mins`,
+        })),
+      },
+    ],
+  });
 }
 
 function getNextThreeDays(): string[] {
@@ -243,28 +268,88 @@ async function groupSlotsByDay(salonId: string, serviceId: string) {
   };
 }
 
-function buildSlotsMenu(
+async function sendSlotsList(
+  phone: string,
   service: SalonService,
   grouped: Record<string, AvailableSlot[]>,
-): string {
-  const lines = [
-    `${service.name} selected`,
-    `Rs.${service.price} | ${service.duration_minutes} mins`,
-    "",
-    "Available slots:",
-  ];
-  let i = 1;
-  for (const [label, slots] of Object.entries(grouped)) {
-    lines.push("");
-    lines.push(label);
-    for (const slot of slots) {
-      lines.push(`${i}. ${formatTimeRange(slot.start_time, slot.end_time)}`);
-      i++;
-    }
+): Promise<void> {
+  // WhatsApp caps interactive lists at 10 rows total across all sections.
+  let remaining = 10;
+  const sections = [] as { title: string; rows: { id: string; title: string }[] }[];
+  for (const [dayLabel, slots] of Object.entries(grouped)) {
+    if (remaining <= 0) break;
+    const rows = slots.slice(0, remaining).map((slot) => ({
+      id: `${SLOT_ID_PREFIX}${slot.id}`,
+      title: truncate(formatTimeRange(slot.start_time, slot.end_time), ROW_TITLE_MAX),
+    }));
+    remaining -= rows.length;
+    sections.push({ title: truncate(dayLabel, ROW_TITLE_MAX), rows });
   }
-  lines.push("");
-  lines.push("Reply with the slot number to book.");
-  return lines.join("\n");
+
+  await sendWhatsAppListMessage({
+    recipientPhone: phone,
+    header: truncate(service.name, 60),
+    body: `Rs.${service.price} • ${service.duration_minutes} mins. Pick a slot to book.`,
+    buttonText: "View slots",
+    sections,
+  });
+}
+
+async function handleServicePicked(customerPhone: string, serviceId: string): Promise<void> {
+  const services = await getSalonServices(SALON_ID);
+  const service = services.find((s) => s.id === serviceId);
+  if (!service) {
+    // Stale id — show the current list again.
+    await sendServicesList(customerPhone, services);
+    return;
+  }
+
+  const { grouped, allSlots } = await groupSlotsByDay(SALON_ID, service.id);
+  if (allSlots.length === 0) {
+    await sendWhatsAppMessage({
+      recipientPhone: customerPhone,
+      message:
+        "No slots available for this service in the next 3 days. Please try another service or call us.",
+    });
+    return;
+  }
+
+  await sendSlotsList(customerPhone, service, grouped);
+  await saveSession({
+    phone: customerPhone,
+    step: "awaiting_slot",
+    selected_service_id: service.id,
+    selected_slot_id: null,
+    customer_name: null,
+  });
+}
+
+async function handleSlotPicked(
+  customerPhone: string,
+  serviceId: string,
+  slotId: string,
+): Promise<void> {
+  const { allSlots, grouped } = await groupSlotsByDay(SALON_ID, serviceId);
+  const slot = allSlots.find((s) => s.id === slotId);
+  if (!slot) {
+    // Slot is gone or stale — re-show the slot list.
+    const services = await getSalonServices(SALON_ID);
+    const service = services.find((s) => s.id === serviceId);
+    if (service) await sendSlotsList(customerPhone, service, grouped);
+    return;
+  }
+
+  await sendWhatsAppMessage({
+    recipientPhone: customerPhone,
+    message: "Got it. Please reply with your full name to confirm the booking.",
+  });
+  await saveSession({
+    phone: customerPhone,
+    step: "awaiting_name",
+    selected_service_id: serviceId,
+    selected_slot_id: slotId,
+    customer_name: null,
+  });
 }
 
 async function sendWelcome(phone: string): Promise<void> {
@@ -377,10 +462,7 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
 
   if (buttonId === BTN_VIEW_SERVICES) {
     const services = await getSalonServices(SALON_ID);
-    await sendWhatsAppMessage({
-      recipientPhone: customerPhone,
-      message: buildServicesMenu(services),
-    });
+    await sendServicesList(customerPhone, services);
     await saveSession({
       phone: customerPhone,
       step: "awaiting_service",
@@ -388,6 +470,27 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
       selected_slot_id: null,
       customer_name: null,
     });
+    return;
+  }
+
+  // Service picked from the interactive list — handle regardless of step.
+  if (buttonId?.startsWith(SERVICE_ID_PREFIX)) {
+    await handleServicePicked(customerPhone, buttonId.slice(SERVICE_ID_PREFIX.length));
+    return;
+  }
+
+  // Slot picked from the interactive list — needs a service in session.
+  if (buttonId?.startsWith(SLOT_ID_PREFIX)) {
+    if (!session.selected_service_id) {
+      await sendWelcome(customerPhone);
+      await resetSession(customerPhone);
+      return;
+    }
+    await handleSlotPicked(
+      customerPhone,
+      session.selected_service_id,
+      buttonId.slice(SLOT_ID_PREFIX.length),
+    );
     return;
   }
 
@@ -401,33 +504,12 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
   if (session.step === "awaiting_service") {
     const services = await getSalonServices(SALON_ID);
     const num = parseMenuNumber(text, services.length);
-    if (!num) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: `Please reply with a number between 1 and ${services.length}.`,
-      });
+    if (num) {
+      await handleServicePicked(customerPhone, services[num - 1].id);
       return;
     }
-    const service = services[num - 1];
-    const { grouped, allSlots } = await groupSlotsByDay(SALON_ID, service.id);
-    if (allSlots.length === 0) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: "No slots available for this service in the next 3 days. Please try another service or call us.",
-      });
-      return;
-    }
-    await sendWhatsAppMessage({
-      recipientPhone: customerPhone,
-      message: buildSlotsMenu(service, grouped),
-    });
-    await saveSession({
-      phone: customerPhone,
-      step: "awaiting_slot",
-      selected_service_id: service.id,
-      selected_slot_id: null,
-      customer_name: null,
-    });
+    // Unknown input — just re-send the list so they can tap.
+    await sendServicesList(customerPhone, services);
     return;
   }
 
@@ -437,27 +519,23 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
       await resetSession(customerPhone);
       return;
     }
-    const { allSlots } = await groupSlotsByDay(SALON_ID, session.selected_service_id);
+    const { allSlots, grouped } = await groupSlotsByDay(
+      SALON_ID,
+      session.selected_service_id,
+    );
     const num = parseMenuNumber(text, allSlots.length);
-    if (!num) {
-      await sendWhatsAppMessage({
-        recipientPhone: customerPhone,
-        message: `Please reply with a slot number between 1 and ${allSlots.length}.`,
-      });
+    if (num) {
+      await handleSlotPicked(
+        customerPhone,
+        session.selected_service_id,
+        allSlots[num - 1].id,
+      );
       return;
     }
-    const slot = allSlots[num - 1];
-    await sendWhatsAppMessage({
-      recipientPhone: customerPhone,
-      message: "Got it. Please reply with your full name to confirm the booking.",
-    });
-    await saveSession({
-      phone: customerPhone,
-      step: "awaiting_name",
-      selected_service_id: session.selected_service_id,
-      selected_slot_id: slot.id,
-      customer_name: null,
-    });
+    // Unknown input — re-send the slots list.
+    const services = await getSalonServices(SALON_ID);
+    const service = services.find((s) => s.id === session.selected_service_id);
+    if (service) await sendSlotsList(customerPhone, service, grouped);
     return;
   }
 
