@@ -26,6 +26,9 @@ const BTN_VIEW_SERVICES = "view_services";
 const BTN_TALK_OWNER = "talk_owner";
 const SERVICE_ID_PREFIX = "service_";
 const SLOT_ID_PREFIX = "slot_";
+// Separate prefix for the "Talk to Owner" callback flow so a list tap there
+// doesn't get routed into the booking flow.
+const CALLBACK_SERVICE_ID_PREFIX = "cb_service_";
 
 // WhatsApp list-message row title max is 24 chars.
 const ROW_TITLE_MAX = 24;
@@ -50,7 +53,9 @@ type SessionStep =
   | "idle"
   | "awaiting_service"
   | "awaiting_slot"
-  | "awaiting_name";
+  | "awaiting_name"
+  | "callback_awaiting_name"
+  | "callback_awaiting_service";
 
 type WhatsAppButtonReply = {
   id: string;
@@ -238,6 +243,37 @@ async function sendServicesList(phone: string, services: SalonService[]): Promis
   });
 }
 
+async function sendCallbackServicesList(
+  phone: string,
+  customerName: string,
+  services: SalonService[],
+): Promise<void> {
+  if (services.length === 0) {
+    await sendWhatsAppMessage({
+      recipientPhone: phone,
+      message: `Thanks ${customerName}! Our team will call you shortly.`,
+    });
+    return;
+  }
+
+  await sendWhatsAppListMessage({
+    recipientPhone: phone,
+    header: "Which service?",
+    body: `Thanks ${customerName}! Which service are you interested in?`,
+    buttonText: "Choose service",
+    sections: [
+      {
+        title: "Services",
+        rows: services.slice(0, 10).map((s) => ({
+          id: `${CALLBACK_SERVICE_ID_PREFIX}${s.id}`,
+          title: truncate(s.name, ROW_TITLE_MAX),
+          description: `Rs.${s.price} • ${s.duration_minutes} mins`,
+        })),
+      },
+    ],
+  });
+}
+
 function getNextThreeDays(): string[] {
   const days: string[] = [];
   for (let i = 0; i < 3; i++) {
@@ -352,6 +388,44 @@ async function handleSlotPicked(
   });
 }
 
+async function handleCallbackServicePicked(
+  customerPhone: string,
+  customerName: string | null,
+  serviceId: string,
+): Promise<void> {
+  const services = await getSalonServices(SALON_ID);
+  const service = services.find((s) => s.id === serviceId);
+  if (!service || !customerName) {
+    // Lost name or stale id — start over.
+    await sendWelcome(customerPhone);
+    await resetSession(customerPhone);
+    return;
+  }
+
+  await sendWhatsAppMessage({
+    recipientPhone: customerPhone,
+    message: `Thanks ${customerName}! Our team will call you shortly about ${service.name}.`,
+  });
+
+  const ownerPhone = process.env.META_OWNER_WHATSAPP_TO;
+  if (ownerPhone && normalizePhone(ownerPhone) !== normalizePhone(customerPhone)) {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: [
+        "📞 NEW CALLBACK REQUEST",
+        "",
+        `👤 Customer: ${customerName}`,
+        `📞 Phone: ${customerPhone}`,
+        `💇 Interested in: ${service.name} (Rs.${service.price})`,
+        "",
+        "Please call the customer back.",
+      ].join("\n"),
+    });
+  }
+
+  await resetSession(customerPhone);
+}
+
 async function sendWelcome(phone: string): Promise<void> {
   await sendWhatsAppButtonMessage({
     recipientPhone: phone,
@@ -449,14 +523,19 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
     customer_name: null,
   };
 
-  // Interactive button taps short-circuit the state machine.
+  // "Talk to Owner" button — start the callback intake flow (name → service).
   if (buttonId === BTN_TALK_OWNER) {
     await sendWhatsAppMessage({
       recipientPhone: customerPhone,
-      message: "Thanks! Our team will call you shortly.",
+      message: "Sure! Please reply with your name to start.",
     });
-    await notifyOwnerCallback(customerPhone);
-    await resetSession(customerPhone);
+    await saveSession({
+      phone: customerPhone,
+      step: "callback_awaiting_name",
+      selected_service_id: null,
+      selected_slot_id: null,
+      customer_name: null,
+    });
     return;
   }
 
@@ -473,7 +552,17 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
     return;
   }
 
-  // Service picked from the interactive list — handle regardless of step.
+  // Service picked from the CALLBACK list — handle before the booking list.
+  if (buttonId?.startsWith(CALLBACK_SERVICE_ID_PREFIX)) {
+    await handleCallbackServicePicked(
+      customerPhone,
+      session.customer_name,
+      buttonId.slice(CALLBACK_SERVICE_ID_PREFIX.length),
+    );
+    return;
+  }
+
+  // Service picked from the booking list — handle regardless of step.
   if (buttonId?.startsWith(SERVICE_ID_PREFIX)) {
     await handleServicePicked(customerPhone, buttonId.slice(SERVICE_ID_PREFIX.length));
     return;
@@ -558,6 +647,48 @@ async function routeMessage(message: WhatsAppIncomingMessage, customerPhone: str
     return;
   }
 
+  if (session.step === "callback_awaiting_name") {
+    const name = text.replace(/\s+/g, " ").trim();
+    if (name.length < 2 || name.length > 80) {
+      await sendWhatsAppMessage({
+        recipientPhone: customerPhone,
+        message: "Please send your full name (2-80 characters).",
+      });
+      return;
+    }
+    const services = await getSalonServices(SALON_ID);
+    await sendCallbackServicesList(customerPhone, name, services);
+    await saveSession({
+      phone: customerPhone,
+      step: "callback_awaiting_service",
+      selected_service_id: null,
+      selected_slot_id: null,
+      customer_name: name,
+    });
+    return;
+  }
+
+  if (session.step === "callback_awaiting_service") {
+    const services = await getSalonServices(SALON_ID);
+    const num = parseMenuNumber(text, services.length);
+    if (num && session.customer_name) {
+      await handleCallbackServicePicked(
+        customerPhone,
+        session.customer_name,
+        services[num - 1].id,
+      );
+      return;
+    }
+    // Unknown input — re-send the list.
+    if (session.customer_name) {
+      await sendCallbackServicesList(customerPhone, session.customer_name, services);
+    } else {
+      await sendWelcome(customerPhone);
+      await resetSession(customerPhone);
+    }
+    return;
+  }
+
   // Fallback: anything else → re-greet.
   await sendWelcome(customerPhone);
   await resetSession(customerPhone);
@@ -607,7 +738,12 @@ async function finalizeBooking(args: {
     return;
   }
 
-  const bookingRef = `SALON-${Date.now()}`;
+  // Reference includes the salon owner's phone so the owner can spot at a
+  // glance that the booking is for them; a 6-char random suffix keeps it
+  // unique against the appointments.booking_reference UNIQUE constraint.
+  const refSuffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+  const ownerSegment = OWNER_PHONE_DIGITS || "SALON";
+  const bookingRef = `SALON-${ownerSegment}-${refSuffix}`;
   const { data: appt, error: apptError } = await supabaseService
     .from("appointments")
     .insert({
@@ -669,12 +805,3 @@ async function finalizeBooking(args: {
   });
 }
 
-async function notifyOwnerCallback(customerPhone: string) {
-  const ownerPhone = process.env.META_OWNER_WHATSAPP_TO;
-  if (!ownerPhone) return;
-  if (normalizePhone(ownerPhone) === normalizePhone(customerPhone)) return;
-  await sendWhatsAppMessage({
-    recipientPhone: ownerPhone,
-    message: `Callback request from WhatsApp: ${customerPhone}`,
-  });
-}
