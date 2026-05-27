@@ -4,7 +4,6 @@ import {
   sendWhatsAppMessage,
   sendWhatsAppButtonMessage,
   sendWhatsAppListMessage,
-  notifyOwner,
   getAvailableSlots,
   formatTimeRange,
   formatDate,
@@ -29,6 +28,9 @@ const SLOT_ID_PREFIX = "slot_";
 // Separate prefix for the "Talk to Owner" callback flow so a list tap there
 // doesn't get routed into the booking flow.
 const CALLBACK_SERVICE_ID_PREFIX = "cb_service_";
+// Owner-action button ids for confirm/cancel of pending appointments.
+const OWNER_CONFIRM_PREFIX = "owner_confirm_";
+const OWNER_CANCEL_PREFIX = "owner_cancel_";
 
 // WhatsApp list-message row title max is 24 chars.
 const ROW_TITLE_MAX = 24;
@@ -55,7 +57,12 @@ type SessionStep =
   | "awaiting_slot"
   | "awaiting_name"
   | "callback_awaiting_name"
-  | "callback_awaiting_service";
+  | "callback_awaiting_service"
+  // Owner-side cancel intake — phone is the owner's, selected_service_id
+  // stores the appointment id being acted on, customer_name stores the
+  // reason text once entered.
+  | "owner_awaiting_reason"
+  | "owner_awaiting_alternatives";
 
 type WhatsAppButtonReply = {
   id: string;
@@ -480,30 +487,31 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ status: "ok" });
   }
 
-  const customerPhone = message.from;
-
-  // Drop messages from the salon's own owner number to prevent self-loops
-  // during testing (owner phone = customer phone). Account got banned last
-  // time because outbound to the same number bounced and Meta retried.
-  if (isOwnerPhone(customerPhone)) {
-    return NextResponse.json({ status: "ok" });
-  }
+  const senderPhone = message.from;
 
   try {
     // Idempotency: Meta retries failed webhooks up to 21 times. Skip duplicates.
     // Race-safe via PK conflict.
-    if (!(await claimMessage(message.id, customerPhone))) {
+    if (!(await claimMessage(message.id, senderPhone))) {
       return NextResponse.json({ status: "ok" });
     }
 
     // Per-phone safety cap. If we're already over the limit, drop silently
     // (don't reply, but still ack 200 so Meta doesn't retry).
-    if (await isRateLimited(customerPhone)) {
-      console.warn("Rate-limit hit for", customerPhone);
+    if (await isRateLimited(senderPhone)) {
+      console.warn("Rate-limit hit for", senderPhone);
       return NextResponse.json({ status: "ok" });
     }
 
-    await routeMessage(message, customerPhone);
+    // Messages from the salon owner go through a dedicated handler that only
+    // recognises confirm/cancel buttons + the cancel-flow text state. Random
+    // owner-side messages do not trigger the customer welcome — that's how we
+    // prevent the self-loops that caused last quarter's ban.
+    if (isOwnerPhone(senderPhone)) {
+      await routeOwnerMessage(message, senderPhone);
+    } else {
+      await routeMessage(message, senderPhone);
+    }
     return NextResponse.json({ status: "ok" });
   } catch (error) {
     console.error("WhatsApp webhook handler error:", error);
@@ -752,7 +760,9 @@ async function finalizeBooking(args: {
       customer_id: customer.id,
       slot_id: slot.id,
       booking_reference: bookingRef,
-      status: "confirmed",
+      // Created in "pending" state — the owner needs to tap Confirm or Cancel
+      // on the WhatsApp notification before the customer is told it's locked in.
+      status: "pending",
       scheduled_start: slot.start_time,
       scheduled_end: slot.end_time,
       price: service.price,
@@ -773,7 +783,8 @@ async function finalizeBooking(args: {
   await sendWhatsAppMessage({
     recipientPhone: customerPhone,
     message: [
-      "Booking Confirmed!",
+      "📩 Booking Received!",
+      "",
       `Name: ${customerName}`,
       `Service: ${service.name}`,
       `Date: ${formatDate(slot.start_time)}`,
@@ -781,27 +792,315 @@ async function finalizeBooking(args: {
       `Amount: Rs.${service.price}`,
       `Reference: ${bookingRef}`,
       "",
-      "Thank you! Our team will call you shortly to confirm.",
+      "Awaiting confirmation from the owner. We'll message you as soon as it's confirmed.",
     ].join("\n"),
   });
 
-  await notifyOwner({
+  await sendOwnerBookingApproval({
+    appointmentId: appt.id,
     customerName,
     customerPhone,
     serviceName: service.name,
-    slotDate: formatDate(slot.start_time),
-    slotStartTime: new Date(slot.start_time).toLocaleTimeString("en-IN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-    }),
-    slotEndTime: new Date(slot.end_time).toLocaleTimeString("en-IN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-    }),
+    slotStart: slot.start_time,
+    slotEnd: slot.end_time,
     price: service.price,
     bookingReference: bookingRef,
   });
 }
 
+async function sendOwnerBookingApproval(args: {
+  appointmentId: string;
+  customerName: string;
+  customerPhone: string;
+  serviceName: string;
+  slotStart: string;
+  slotEnd: string;
+  price: number;
+  bookingReference: string;
+}) {
+  const ownerPhone = process.env.META_OWNER_WHATSAPP_TO;
+  if (!ownerPhone) {
+    console.warn("Owner phone not configured — skipping owner approval prompt");
+    return;
+  }
+  if (normalizePhone(ownerPhone) === normalizePhone(args.customerPhone)) {
+    // Same number = testing yourself. Don't try to send.
+    return;
+  }
+
+  const body = [
+    "📌 NEW BOOKING REQUEST",
+    "",
+    `👤 ${args.customerName} (${args.customerPhone})`,
+    `💇 ${args.serviceName}`,
+    `📅 ${formatDate(args.slotStart)}`,
+    `🕐 ${formatTimeRange(args.slotStart, args.slotEnd)}`,
+    `💰 ₹${args.price}`,
+    `📋 ${args.bookingReference}`,
+    "",
+    "Tap below to confirm or cancel.",
+  ].join("\n");
+
+  await sendWhatsAppButtonMessage({
+    recipientPhone: ownerPhone,
+    body,
+    buttons: [
+      { id: `${OWNER_CONFIRM_PREFIX}${args.appointmentId}`, title: "Confirm" },
+      { id: `${OWNER_CANCEL_PREFIX}${args.appointmentId}`, title: "Cancel" },
+    ],
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Owner-side handler — never falls through to the customer welcome flow.
+// ---------------------------------------------------------------------------
+
+type AppointmentForOwner = {
+  id: string;
+  booking_reference: string;
+  status: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  price: number;
+  service: { name: string } | null;
+  customer: { name: string; phone: string | null } | null;
+};
+
+async function loadAppointmentForOwner(
+  appointmentId: string,
+): Promise<AppointmentForOwner | null> {
+  const { data } = await supabaseService
+    .from("appointments")
+    .select(
+      `id, booking_reference, status, scheduled_start, scheduled_end, price,
+       service:services(name),
+       customer:customers(name, phone)`,
+    )
+    .eq("id", appointmentId)
+    .maybeSingle();
+  return (data as unknown as AppointmentForOwner | null) ?? null;
+}
+
+async function routeOwnerMessage(
+  message: WhatsAppIncomingMessage,
+  ownerPhone: string,
+) {
+  const text = extractText(message);
+  const buttonId = extractButtonId(message);
+
+  if (buttonId?.startsWith(OWNER_CONFIRM_PREFIX)) {
+    await handleOwnerConfirm(buttonId.slice(OWNER_CONFIRM_PREFIX.length), ownerPhone);
+    return;
+  }
+
+  if (buttonId?.startsWith(OWNER_CANCEL_PREFIX)) {
+    await handleOwnerCancelStart(buttonId.slice(OWNER_CANCEL_PREFIX.length), ownerPhone);
+    return;
+  }
+
+  // The cancel flow is text-based after the initial button tap.
+  const session = await loadSession(ownerPhone);
+  if (!session || !session.selected_service_id) return;
+
+  if (session.step === "owner_awaiting_reason") {
+    const reason = text.trim();
+    if (!reason) {
+      await sendWhatsAppMessage({
+        recipientPhone: ownerPhone,
+        message: "Please send a short reason (a few words is fine).",
+      });
+      return;
+    }
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message:
+        "Thanks. Now suggest one or more alternative slot timings the customer could try (e.g. 'Tomorrow 4pm or 6pm').",
+    });
+    await saveSession({
+      phone: ownerPhone,
+      step: "owner_awaiting_alternatives",
+      selected_service_id: session.selected_service_id,
+      selected_slot_id: null,
+      customer_name: reason,
+    });
+    return;
+  }
+
+  if (session.step === "owner_awaiting_alternatives") {
+    const alternatives = text.trim();
+    if (!alternatives) {
+      await sendWhatsAppMessage({
+        recipientPhone: ownerPhone,
+        message: "Please send the alternative slot timings.",
+      });
+      return;
+    }
+    await handleOwnerCancelFinalize(
+      session.selected_service_id,
+      session.customer_name,
+      alternatives,
+      ownerPhone,
+    );
+    return;
+  }
+
+  // Owner sent a message that doesn't match any known flow — ignore silently
+  // (never reply to the owner with the customer-facing welcome).
+}
+
+async function handleOwnerConfirm(appointmentId: string, ownerPhone: string) {
+  const appt = await loadAppointmentForOwner(appointmentId);
+  if (!appt) {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: "That booking was not found.",
+    });
+    return;
+  }
+  if (appt.status === "confirmed") {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: `Already confirmed — reference ${appt.booking_reference}.`,
+    });
+    return;
+  }
+  if (appt.status === "cancelled") {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: `This booking was already cancelled.`,
+    });
+    return;
+  }
+
+  const { error: updateError } = await supabaseService
+    .from("appointments")
+    .update({ status: "confirmed" })
+    .eq("id", appointmentId);
+
+  if (updateError) {
+    console.error("Confirm update failed:", updateError);
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: "Sorry, the confirmation didn't go through. Please try again.",
+    });
+    return;
+  }
+
+  if (appt.customer?.phone) {
+    await sendWhatsAppMessage({
+      recipientPhone: appt.customer.phone,
+      message: [
+        "✅ Booking Confirmed!",
+        "",
+        `Hi ${appt.customer.name},`,
+        `Your appointment is confirmed.`,
+        "",
+        `Service: ${appt.service?.name ?? "—"}`,
+        `Date: ${formatDate(appt.scheduled_start)}`,
+        `Time: ${formatTimeRange(appt.scheduled_start, appt.scheduled_end)}`,
+        `Amount: Rs.${appt.price}`,
+        `Reference: ${appt.booking_reference}`,
+        "",
+        `Owner contact: ${ownerPhone}`,
+        "",
+        "⏰ Please arrive 5 minutes before your slot timing.",
+        "See you soon!",
+      ].join("\n"),
+    });
+  }
+
+  await sendWhatsAppMessage({
+    recipientPhone: ownerPhone,
+    message: `Done — ${appt.booking_reference} confirmed and ${appt.customer?.name ?? "customer"} notified.`,
+  });
+}
+
+async function handleOwnerCancelStart(appointmentId: string, ownerPhone: string) {
+  const appt = await loadAppointmentForOwner(appointmentId);
+  if (!appt) {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: "That booking was not found.",
+    });
+    return;
+  }
+  if (appt.status === "cancelled") {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: `This booking was already cancelled.`,
+    });
+    return;
+  }
+
+  await sendWhatsAppMessage({
+    recipientPhone: ownerPhone,
+    message:
+      "May I know the reason for cancelling? Send a short note — it'll be shared with the customer.",
+  });
+
+  await saveSession({
+    phone: ownerPhone,
+    step: "owner_awaiting_reason",
+    selected_service_id: appointmentId,
+    selected_slot_id: null,
+    customer_name: null,
+  });
+}
+
+async function handleOwnerCancelFinalize(
+  appointmentId: string,
+  reason: string | null,
+  alternatives: string,
+  ownerPhone: string,
+) {
+  const appt = await loadAppointmentForOwner(appointmentId);
+  if (!appt) {
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: "That booking was not found.",
+    });
+    await resetSession(ownerPhone);
+    return;
+  }
+
+  const { error: updateError } = await supabaseService
+    .from("appointments")
+    .update({ status: "cancelled" })
+    .eq("id", appointmentId);
+
+  if (updateError) {
+    console.error("Cancel update failed:", updateError);
+    await sendWhatsAppMessage({
+      recipientPhone: ownerPhone,
+      message: "Sorry, the cancellation didn't go through. Please try again.",
+    });
+    return;
+  }
+
+  if (appt.customer?.phone) {
+    await sendWhatsAppMessage({
+      recipientPhone: appt.customer.phone,
+      message: [
+        "❌ Booking Update",
+        "",
+        `Hi ${appt.customer.name},`,
+        `Unfortunately, your booking for ${appt.service?.name ?? "your service"} on ${formatDate(appt.scheduled_start)} at ${formatTimeRange(appt.scheduled_start, appt.scheduled_end)} was cancelled by the owner.`,
+        "",
+        `Reason: ${reason || "Not specified"}`,
+        "",
+        `Suggested alternatives from the owner:`,
+        alternatives,
+        "",
+        "Please reply if any of these work, or send 'Hi' to start a new booking.",
+        `Reference: ${appt.booking_reference}`,
+      ].join("\n"),
+    });
+  }
+
+  await sendWhatsAppMessage({
+    recipientPhone: ownerPhone,
+    message: `Done — ${appt.booking_reference} cancelled and ${appt.customer?.name ?? "customer"} notified with your suggested alternatives.`,
+  });
+
+  await resetSession(ownerPhone);
+}

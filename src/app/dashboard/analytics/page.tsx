@@ -4,6 +4,12 @@ import {
   fetchAppointments,
   formatINR,
 } from "@/lib/dashboard";
+import {
+  AreaChart,
+  DonutChart,
+  HorizontalBarChart,
+  HourlyBarsChart,
+} from "@/components/dashboard/Charts";
 
 export const dynamic = "force-dynamic";
 
@@ -19,13 +25,19 @@ function shortDayLabel(iso: string) {
   return new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 }
 
+const SOURCE_COLORS: Record<string, string> = {
+  whatsapp: "#34d399", // emerald
+  web: "#60a5fa", // sky
+  walk_in: "#fbbf24", // amber
+};
+const SOURCE_FALLBACK_COLORS = ["#f87171", "#a78bfa", "#f472b6"];
+
 export default async function AnalyticsPage() {
   const fromIso = daysAgoIso(29); // last 30 days inclusive
   const appointments = await fetchAppointments(DASHBOARD_SALON_ID, { fromIso });
-
   const nonCancelled = appointments.filter((a) => a.status !== "cancelled");
 
-  // Top services by booking count
+  // ---- Top services by booking count ----
   const serviceCounts = new Map<string, { name: string; count: number; revenue: number }>();
   for (const appt of nonCancelled) {
     const id = appt.service?.id ?? "unknown";
@@ -38,9 +50,8 @@ export default async function AnalyticsPage() {
   const topServices = [...serviceCounts.values()]
     .sort((a, b) => b.count - a.count)
     .slice(0, 6);
-  const topServicesMax = topServices[0]?.count || 1;
 
-  // Revenue by day (last 14 days)
+  // ---- Revenue by day (last 14 days) ----
   const revenueDays: { day: string; revenue: number; count: number }[] = [];
   for (let offset = 13; offset >= 0; offset--) {
     const d = new Date();
@@ -48,49 +59,49 @@ export default async function AnalyticsPage() {
     d.setDate(d.getDate() - offset);
     revenueDays.push({ day: d.toISOString().slice(0, 10), revenue: 0, count: 0 });
   }
-  const revenueIndex = new Map(revenueDays.map((entry) => [entry.day, entry]));
+  const revenueIndex = new Map(revenueDays.map((e) => [e.day, e]));
   for (const appt of nonCancelled) {
-    const key = dayKey(appt.scheduled_start);
-    const bucket = revenueIndex.get(key);
+    const bucket = revenueIndex.get(dayKey(appt.scheduled_start));
     if (bucket) {
       bucket.revenue += Number(appt.price || 0);
       bucket.count += 1;
     }
   }
-  const maxDailyRevenue = Math.max(...revenueDays.map((d) => d.revenue), 1);
 
-  // Peak hours (by booking count)
+  // ---- Peak hours (full 24-hour breakdown) ----
   const hourCounts = new Array(24).fill(0) as number[];
   for (const appt of nonCancelled) {
     const hour = new Date(appt.scheduled_start).getHours();
     hourCounts[hour] += 1;
   }
-  const maxHour = Math.max(...hourCounts, 1);
-  const peakHourRows = hourCounts
-    .map((count, hour) => ({ hour, count }))
-    .filter((row) => row.count > 0)
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 6);
+  const allHours = hourCounts.map((value, hour) => ({ hour, value }));
 
-  // Source split (whatsapp vs web vs others)
+  // ---- Booking sources ----
   const sourceCounts = new Map<string, number>();
   for (const appt of nonCancelled) {
     sourceCounts.set(appt.source, (sourceCounts.get(appt.source) || 0) + 1);
   }
-  const totalSources = [...sourceCounts.values()].reduce((sum, n) => sum + n, 0) || 1;
-  const sourceRows = [...sourceCounts.entries()]
+  const totalSources = [...sourceCounts.values()].reduce((sum, n) => sum + n, 0);
+  let fallbackIdx = 0;
+  const sourceSlices = [...sourceCounts.entries()]
     .map(([source, count]) => ({
-      source,
-      count,
-      percent: Math.round((count / totalSources) * 100),
+      label: source,
+      value: count,
+      color:
+        SOURCE_COLORS[source] ??
+        SOURCE_FALLBACK_COLORS[fallbackIdx++ % SOURCE_FALLBACK_COLORS.length],
     }))
-    .sort((a, b) => b.count - a.count);
+    .sort((a, b) => b.value - a.value);
 
-  // Headline numbers
+  // ---- Headline numbers ----
   const totalRevenue = nonCancelled.reduce((sum, a) => sum + Number(a.price || 0), 0);
   const totalBookings = nonCancelled.length;
   const cancelledCount = appointments.length - nonCancelled.length;
   const avgTicket = totalBookings > 0 ? Math.round(totalRevenue / totalBookings) : 0;
+  const peakHour = allHours.reduce((best, cur) => (cur.value > best.value ? cur : best), {
+    hour: 0,
+    value: 0,
+  });
 
   return (
     <div className="space-y-6">
@@ -104,131 +115,121 @@ export default async function AnalyticsPage() {
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: "Total bookings", value: totalBookings.toString() },
-          { label: "Revenue (30d)", value: formatINR(totalRevenue) },
-          { label: "Avg ticket", value: formatINR(avgTicket) },
-          { label: "Cancellations", value: cancelledCount.toString() },
+          { label: "Total bookings", value: totalBookings.toString(), tint: "amber" },
+          { label: "Revenue (30d)", value: formatINR(totalRevenue), tint: "emerald" },
+          { label: "Avg ticket", value: formatINR(avgTicket), tint: "sky" },
+          { label: "Cancellations", value: cancelledCount.toString(), tint: "rose" },
         ].map((card) => (
           <div
             key={card.label}
-            className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl"
+            className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl"
           >
-            <p className="text-xs uppercase tracking-[0.3em] text-slate-400">{card.label}</p>
-            <p className="mt-4 text-3xl font-semibold text-white">{card.value}</p>
+            <div
+              aria-hidden
+              className={`absolute -right-12 -top-12 h-32 w-32 rounded-full blur-3xl ${
+                card.tint === "amber"
+                  ? "bg-amber-400/15"
+                  : card.tint === "emerald"
+                    ? "bg-emerald-400/15"
+                    : card.tint === "sky"
+                      ? "bg-sky-400/15"
+                      : "bg-rose-400/15"
+              }`}
+            />
+            <p className="relative text-xs uppercase tracking-[0.3em] text-slate-400">
+              {card.label}
+            </p>
+            <p className="relative mt-4 text-3xl font-semibold text-white">{card.value}</p>
           </div>
         ))}
+      </section>
+
+      <section className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Revenue trend</h2>
+            <p className="text-xs text-slate-400">Daily revenue from confirmed bookings · last 14 days</p>
+          </div>
+          <div className="text-right">
+            <p className="text-2xl font-semibold text-amber-200">{formatINR(totalRevenue)}</p>
+            <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">30-day total</p>
+          </div>
+        </div>
+        <div className="mt-6 h-64 w-full">
+          {revenueDays.some((d) => d.revenue > 0) ? (
+            <AreaChart
+              data={revenueDays.map((d) => ({
+                x: shortDayLabel(d.day),
+                y: d.revenue,
+              }))}
+              format="inr-compact"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-white/10 text-sm text-slate-400">
+              No revenue data in the last 14 days.
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="grid gap-6 xl:grid-cols-2">
         <div className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
           <h2 className="text-lg font-semibold text-white">Top services</h2>
-          <p className="text-xs text-slate-400">By booking count</p>
-          {topServices.length === 0 ? (
-            <p className="mt-6 rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
-              No bookings yet.
-            </p>
-          ) : (
-            <ul className="mt-4 space-y-3">
-              {topServices.map((service) => (
-                <li key={service.name}>
-                  <div className="flex items-baseline justify-between text-sm">
-                    <span className="font-medium text-white">{service.name}</span>
-                    <span className="text-xs text-slate-400">
-                      {service.count} bookings • {formatINR(service.revenue)}
-                    </span>
-                  </div>
-                  <div className="mt-1 h-2 overflow-hidden rounded-full bg-white/5">
-                    <div
-                      className="h-full rounded-full bg-amber-400"
-                      style={{ width: `${(service.count / topServicesMax) * 100}%` }}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+          <p className="text-xs text-slate-400">By booking count · last 30 days</p>
+          <div className="mt-6">
+            <HorizontalBarChart
+              rows={topServices.map((s) => ({
+                label: s.name,
+                value: s.count,
+                sub: `${s.count} bookings · ${formatINR(s.revenue)}`,
+              }))}
+            />
+          </div>
         </div>
 
         <div className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
           <h2 className="text-lg font-semibold text-white">Booking sources</h2>
           <p className="text-xs text-slate-400">Where bookings come from</p>
-          {sourceRows.length === 0 ? (
-            <p className="mt-6 rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
+          <div className="mt-6">
+            {totalSources === 0 ? (
+              <p className="rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
+                No bookings yet.
+              </p>
+            ) : (
+              <DonutChart slices={sourceSlices} total={totalSources} totalLabel="bookings" />
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Peak hours</h2>
+            <p className="text-xs text-slate-400">All 24 hours · hover bars for counts</p>
+          </div>
+          {peakHour.value > 0 && (
+            <p className="text-sm text-amber-200">
+              Busiest at{" "}
+              <span className="font-semibold">
+                {new Date(0, 0, 0, peakHour.hour).toLocaleTimeString("en-IN", {
+                  hour: "2-digit",
+                  hour12: true,
+                })}
+              </span>{" "}
+              · {peakHour.value} bookings
+            </p>
+          )}
+        </div>
+        <div className="mt-6">
+          {totalBookings === 0 ? (
+            <p className="rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
               No bookings yet.
             </p>
           ) : (
-            <ul className="mt-4 space-y-3">
-              {sourceRows.map((row) => (
-                <li key={row.source}>
-                  <div className="flex items-baseline justify-between text-sm">
-                    <span className="font-medium text-white capitalize">{row.source}</span>
-                    <span className="text-xs text-slate-400">
-                      {row.count} ({row.percent}%)
-                    </span>
-                  </div>
-                  <div className="mt-1 h-2 overflow-hidden rounded-full bg-white/5">
-                    <div
-                      className="h-full rounded-full bg-emerald-400"
-                      style={{ width: `${row.percent}%` }}
-                    />
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <HourlyBarsChart hours={allHours} />
           )}
         </div>
-      </section>
-
-      <section className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
-        <h2 className="text-lg font-semibold text-white">Revenue last 14 days</h2>
-        <p className="text-xs text-slate-400">Daily revenue from confirmed bookings</p>
-        <div className="mt-6 flex h-48 items-end gap-2">
-          {revenueDays.map((entry) => {
-            const heightPct = entry.revenue > 0 ? (entry.revenue / maxDailyRevenue) * 100 : 2;
-            return (
-              <div key={entry.day} className="flex flex-1 flex-col items-center gap-2">
-                <div
-                  className="w-full rounded-t-lg bg-gradient-to-t from-amber-500/60 to-amber-300"
-                  style={{ height: `${heightPct}%` }}
-                  title={`${formatINR(entry.revenue)} (${entry.count} bookings)`}
-                />
-                <span className="text-[10px] text-slate-500">{shortDayLabel(entry.day)}</span>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="rounded-[2rem] border border-white/10 bg-white/5 p-6 backdrop-blur-xl">
-        <h2 className="text-lg font-semibold text-white">Peak hours</h2>
-        <p className="text-xs text-slate-400">When customers book most</p>
-        {peakHourRows.length === 0 ? (
-          <p className="mt-6 rounded-2xl border border-dashed border-white/10 p-6 text-center text-sm text-slate-400">
-            No bookings yet.
-          </p>
-        ) : (
-          <ul className="mt-4 space-y-3">
-            {peakHourRows.map((row) => (
-              <li key={row.hour}>
-                <div className="flex items-baseline justify-between text-sm">
-                  <span className="font-medium text-white">
-                    {new Date(0, 0, 0, row.hour).toLocaleTimeString("en-IN", {
-                      hour: "2-digit",
-                      hour12: true,
-                    })}
-                  </span>
-                  <span className="text-xs text-slate-400">{row.count} bookings</span>
-                </div>
-                <div className="mt-1 h-2 overflow-hidden rounded-full bg-white/5">
-                  <div
-                    className="h-full rounded-full bg-sky-400"
-                    style={{ width: `${(row.count / maxHour) * 100}%` }}
-                  />
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
       </section>
     </div>
   );
