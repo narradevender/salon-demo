@@ -292,7 +292,53 @@ export async function getServiceById(serviceId: string) {
   return data;
 }
 
+// Standard daily slot times in IST (24h). Used to auto-generate slots for
+// the requested date if none exist yet, so the demo never goes stale.
+const DEFAULT_IST_SLOT_HOURS = [10, 14, 17];
+
+async function ensureSlotsForDate(salonId: string, serviceId: string, date: string) {
+  const startOfDay = `${date}T00:00:00Z`;
+  const endOfDay = `${date}T23:59:59Z`;
+
+  const { count } = await supabaseService
+    .from("availability_slots")
+    .select("id", { count: "exact", head: true })
+    .eq("salon_id", salonId)
+    .eq("service_id", serviceId)
+    .gte("start_time", startOfDay)
+    .lte("end_time", endOfDay);
+
+  if ((count ?? 0) > 0) return;
+
+  const { data: service } = await supabaseService
+    .from("services")
+    .select("duration_minutes")
+    .eq("id", serviceId)
+    .single();
+  if (!service) return;
+
+  const [year, month, day] = date.split("-").map(Number);
+
+  const rows = DEFAULT_IST_SLOT_HOURS
+    // IST = UTC+5:30, so H IST on `date` = (H-5):(-30) UTC on `date`.
+    .map((istHour) => new Date(Date.UTC(year, month - 1, day, istHour - 5, -30)))
+    // Skip times that are already in the past (relevant for "today").
+    .filter((start) => start.getTime() > Date.now())
+    .map((start) => ({
+      salon_id: salonId,
+      service_id: serviceId,
+      start_time: start.toISOString(),
+      end_time: new Date(start.getTime() + service.duration_minutes * 60_000).toISOString(),
+    }));
+
+  if (rows.length === 0) return;
+
+  await supabaseService.from("availability_slots").insert(rows);
+}
+
 export async function getAvailableSlots(salonId: string, serviceId: string, date: string) {
+  await ensureSlotsForDate(salonId, serviceId, date);
+
   const startOfDay = `${date}T00:00:00Z`;
   const endOfDay = `${date}T23:59:59Z`;
 
